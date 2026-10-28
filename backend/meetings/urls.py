@@ -8,6 +8,10 @@ from .views import (
     MeetingFileDownloadUrlView,
     MeetingFileDetailView,
     MeetingTranscribeView,
+    MeetingBatchGenerateTranscriptsView,
+    MeetingTranscriptsListView,
+    MeetingTranscriptDetailContentView,
+    MeetingSummaryView,
 )
 
 app_name = 'meetings'
@@ -21,4 +25,11 @@ urlpatterns = [
     path('<int:pk>/files/<int:file_id>/', MeetingFileDetailView.as_view(), name='meeting-file-detail'),
     path('<int:pk>/files/', MeetingFileListView.as_view(), name='meeting-file-list'),
     path('<int:pk>/transcribe/', MeetingTranscribeView.as_view(), name='meeting-transcribe'),
+    path('<int:pk>/generate-transcripts/', MeetingBatchGenerateTranscriptsView.as_view(), name='meeting-generate-transcripts'),
+    path('<int:pk>/transcripts/', MeetingTranscriptsListView.as_view(), name='meeting-transcripts-list'),
+    path('<int:pk>/transcripts/<int:transcript_id>/', MeetingTranscriptDetailContentView.as_view(), name='meeting-transcript-detail-content'),
+    path('<int:pk>/generate-summary/', MeetingSummaryView.as_view(), name='meeting-generate-summary'),
+    path('<int:pk>/summary/', MeetingSummaryView.as_view(), name='meeting-summary'),
+    path('<int:pk>/generate-notes/', MeetingSummaryView.as_view(), name='meeting-generate-notes'),
 ]
+

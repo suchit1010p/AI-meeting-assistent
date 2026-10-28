@@ -12,6 +12,8 @@ from .s3_utils import (
 class MeetingFileSerializer(serializers.ModelSerializer):
     """Serializer for displaying MeetingFile metadata."""
     meeting_id = serializers.IntegerField(source='meeting.id', read_only=True)
+    audio_file_id = serializers.IntegerField(source='audio_file.id', read_only=True, allow_null=True)
+    original_audio_filename = serializers.SerializerMethodField(read_only=True)
     download_url = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -19,13 +21,20 @@ class MeetingFileSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'meeting_id',
+            'audio_file_id',
+            'original_audio_filename',
             'file_type',
             's3_key',
             'original_filename',
             'download_url',
             'created_at',
         ]
-        read_only_fields = ['id', 'meeting_id', 'download_url', 'created_at']
+        read_only_fields = ['id', 'meeting_id', 'audio_file_id', 'original_audio_filename', 'download_url', 'created_at']
+
+    def get_original_audio_filename(self, obj):
+        if obj and obj.audio_file:
+            return obj.audio_file.original_filename
+        return None
 
     def get_download_url(self, obj):
         if not obj or not obj.s3_key:
@@ -168,5 +177,30 @@ class TranscribeResponseSerializer(serializers.Serializer):
     original_filename = serializers.CharField()
     status = serializers.CharField()
     language = serializers.CharField(required=False)
-    confidence = serializers.FloatField(required=False)
     words_count = serializers.IntegerField(required=False)
+
+
+class BatchTranscribeRequestSerializer(serializers.Serializer):
+    """Serializer for batch transcribing all audio files for a meeting."""
+    language = serializers.CharField(
+        max_length=32,
+        required=False,
+        default='multi',
+        allow_blank=True,
+        help_text="Target language or 'multi' for multilingual code-switching across Gujarati, Hindi, English."
+    )
+    retranscribe = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Force re-transcription if transcripts already exist."
+    )
+
+
+class GenerateSummaryRequestSerializer(serializers.Serializer):
+    """Serializer for meeting notes generation request."""
+    regenerate = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Force regeneration if a summary already exists."
+    )
+

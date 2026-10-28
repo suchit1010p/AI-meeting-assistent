@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 from django.shortcuts import get_object_or_404
@@ -13,6 +14,8 @@ from .serializers import (
     ConfirmFileRequestSerializer,
     TranscribeRequestSerializer,
     TranscribeResponseSerializer,
+    BatchTranscribeRequestSerializer,
+    GenerateSummaryRequestSerializer,
 )
 from .s3_utils import (
     generate_presigned_upload_url,
@@ -35,6 +38,18 @@ from .transcription_service import (
     TranscriptionBadRequestError,
     TranscriptionServiceError,
 )
+from .summary_service import (
+    generate_notes_from_transcript_text,
+    format_summary_as_markdown,
+    SummaryError,
+    SummaryConfigurationError,
+    SummaryAuthenticationError,
+    SummaryRateLimitError,
+    SummaryTimeoutError,
+    SummaryBadRequestError,
+    SummaryServiceError,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -529,6 +544,7 @@ class MeetingTranscribeView(APIView):
         try:
             transcript_file = MeetingFile.objects.create(
                 meeting=meeting,
+                audio_file=audio_file,
                 file_type='transcript',
                 s3_key=transcript_s3_key,
                 original_filename=transcript_filename
@@ -545,6 +561,8 @@ class MeetingTranscribeView(APIView):
         return Response({
             'transcript': transcript_text,
             'transcript_file_id': transcript_file.id,
+            'audio_file_id': audio_file.id,
+            'original_audio_filename': audio_file.original_filename,
             's3_key': transcript_s3_key,
             'original_filename': transcript_filename,
             'status': 'completed',
@@ -552,3 +570,477 @@ class MeetingTranscribeView(APIView):
             'words_count': transcription_result.get('words_count', 0),
             'language': transcription_result.get('language', language),
         }, status=status.HTTP_200_OK)
+
+
+class MeetingBatchGenerateTranscriptsView(APIView):
+    """
+    POST /api/meetings/<id>/generate-transcripts/
+    Processes all audio files belonging to a meeting.
+    Retrieves each audio file using its saved S3 key, checks S3 existence,
+    calls Deepgram API with multilingual support (Gujarati, Hindi, English),
+    saves each transcript as a UTF-8 .txt file in private S3,
+    and records a MeetingFile record linked to the original audio file.
+    """
+
+    def post(self, request, pk):
+        meeting = get_object_or_404(Meeting, pk=pk)
+
+        serializer = BatchTranscribeRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        language = serializer.validated_data.get('language') or 'multi'
+        retranscribe = serializer.validated_data.get('retranscribe', False)
+
+        audio_files = meeting.files.filter(file_type='audio').order_by('created_at')
+        if not audio_files.exists():
+            return Response(
+                {"error": "No audio files found for this meeting. Please record or upload audio first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        results = []
+        successful_count = 0
+        failed_count = 0
+
+        for audio_file in audio_files:
+            audio_stem = Path(audio_file.original_filename).stem if audio_file.original_filename else f"audio_{audio_file.id}"
+            transcript_filename = f"{audio_stem}_transcript.txt"
+
+            # Check for existing transcript for this specific audio file
+            existing_transcript = meeting.files.filter(
+                file_type='transcript',
+                audio_file=audio_file
+            ).first()
+
+            if not existing_transcript:
+                # Also check by original_filename convention
+                existing_transcript = meeting.files.filter(
+                    file_type='transcript',
+                    original_filename=transcript_filename
+                ).first()
+                if existing_transcript and not existing_transcript.audio_file:
+                    existing_transcript.audio_file = audio_file
+                    existing_transcript.save(update_fields=['audio_file'])
+
+            if existing_transcript and not retranscribe:
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'transcript_file_id': existing_transcript.id,
+                    'transcript_filename': existing_transcript.original_filename,
+                    's3_key': existing_transcript.s3_key,
+                    'status': 'already_exists',
+                    'message': 'Existing transcript reused.',
+                })
+                successful_count += 1
+                continue
+
+            # Verify audio file exists in S3
+            if not check_s3_object_exists(audio_file.s3_key):
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'status': 'failed',
+                    'error': f"Audio file not found in S3 ({audio_file.s3_key}).",
+                })
+                failed_count += 1
+                continue
+
+            # Call Deepgram API
+            try:
+                transcription_result = transcribe_audio_from_s3(
+                    s3_key=audio_file.s3_key,
+                    language=language
+                )
+                transcript_text = transcription_result.get('transcript', '')
+
+                # Upload transcript to S3 as UTF-8 .txt
+                transcript_s3_key = generate_s3_key(
+                    meeting_id=meeting.id,
+                    file_type='transcript',
+                    content_type='text/plain',
+                    original_filename=transcript_filename
+                )
+                upload_s3_object_bytes(
+                    s3_key=transcript_s3_key,
+                    data=transcript_text.encode('utf-8'),
+                    content_type='text/plain; charset=utf-8'
+                )
+
+                # Save or update MeetingFile record
+                if existing_transcript and retranscribe:
+                    existing_transcript.s3_key = transcript_s3_key
+                    existing_transcript.audio_file = audio_file
+                    existing_transcript.original_filename = transcript_filename
+                    existing_transcript.save()
+                    transcript_file = existing_transcript
+                else:
+                    transcript_file = MeetingFile.objects.create(
+                        meeting=meeting,
+                        audio_file=audio_file,
+                        file_type='transcript',
+                        s3_key=transcript_s3_key,
+                        original_filename=transcript_filename
+                    )
+
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'transcript_file_id': transcript_file.id,
+                    'transcript_filename': transcript_filename,
+                    's3_key': transcript_s3_key,
+                    'status': 'completed',
+                    'words_count': transcription_result.get('words_count', 0),
+                    'language': transcription_result.get('language', language),
+                })
+                successful_count += 1
+
+            except TranscriptionConfigurationError:
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'status': 'failed',
+                    'error': 'Deepgram API key is not configured in backend environment.',
+                })
+                failed_count += 1
+            except TranscriptionAuthenticationError:
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'status': 'failed',
+                    'error': 'Deepgram authentication failed. Please verify DEEPGRAM_API_KEY.',
+                })
+                failed_count += 1
+            except TranscriptionRateLimitError:
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'status': 'failed',
+                    'error': 'Deepgram rate limit reached. Please try again shortly.',
+                })
+                failed_count += 1
+            except TranscriptionTimeoutError:
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'status': 'failed',
+                    'error': 'Deepgram request timed out.',
+                })
+                failed_count += 1
+            except TranscriptionBadRequestError as err:
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'status': 'failed',
+                    'error': f"Invalid audio request: {str(err)}",
+                })
+                failed_count += 1
+            except TranscriptionServiceError:
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'status': 'failed',
+                    'error': 'Deepgram service is temporarily unavailable.',
+                })
+                failed_count += 1
+            except Exception as err:
+                logger.error(f"Error transcribing audio file {audio_file.id}: {err}")
+                results.append({
+                    'audio_file_id': audio_file.id,
+                    'audio_filename': audio_file.original_filename,
+                    'status': 'failed',
+                    'error': str(err),
+                })
+                failed_count += 1
+
+        return Response({
+            'message': f"Processed {len(audio_files)} audio file(s): {successful_count} succeeded, {failed_count} failed.",
+            'total': len(audio_files),
+            'successful': successful_count,
+            'failed': failed_count,
+            'results': results,
+        }, status=status.HTTP_200_OK if successful_count > 0 or len(audio_files) == 0 else status.HTTP_502_BAD_GATEWAY)
+
+
+class MeetingTranscriptsListView(APIView):
+    """
+    GET /api/meetings/<id>/transcripts/
+    Lists saved transcript metadata for a meeting.
+    """
+
+    def get(self, request, pk):
+        meeting = get_object_or_404(Meeting, pk=pk)
+        transcripts = meeting.files.filter(file_type='transcript').order_by('-created_at')
+        serializer = MeetingFileSerializer(transcripts, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MeetingTranscriptDetailContentView(APIView):
+    """
+    GET /api/meetings/<id>/transcripts/<transcript_id>/
+    Retrieves the actual transcript text directly from private S3 using its saved S3 key.
+    """
+
+    def get(self, request, pk, transcript_id):
+        meeting = get_object_or_404(Meeting, pk=pk)
+        transcript_file = get_object_or_404(
+            MeetingFile,
+            pk=transcript_id,
+            meeting=meeting,
+            file_type='transcript'
+        )
+
+        try:
+            bytes_data = get_s3_object_bytes(transcript_file.s3_key)
+            content = bytes_data.decode('utf-8', errors='replace')
+        except Exception as err:
+            logger.error(f"Failed to fetch transcript content from S3 ({transcript_file.s3_key}): {err}")
+            return Response(
+                {"error": "Failed to retrieve transcript content from S3 storage."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response({
+            'id': transcript_file.id,
+            'meeting_id': meeting.id,
+            'audio_file_id': transcript_file.audio_file_id,
+            'original_audio_filename': transcript_file.audio_file.original_filename if transcript_file.audio_file else None,
+            'original_filename': transcript_file.original_filename,
+            'content': content,
+            's3_key': transcript_file.s3_key,
+            'created_at': transcript_file.created_at,
+        }, status=status.HTTP_200_OK)
+
+
+class MeetingSummaryView(APIView):
+    """
+    POST /api/meetings/<id>/generate-summary/ (or /summary/)
+    GET  /api/meetings/<id>/summary/
+
+    POST:
+    1. Retrieves all registered transcript files for the meeting from SQLite.
+    2. Fetches each transcript's actual text from private S3.
+    3. Combines transcripts in a deterministic order, referencing original audio filenames.
+    4. Sends combined text to Groq API using the meeting analysis prompt.
+    5. Saves structured JSON meeting notes to private S3.
+    6. Creates/updates a MeetingFile record with file_type='summary'.
+    7. Returns the generated notes and summary file ID.
+
+    GET:
+    Retrieves the saved summary from private S3 and returns structured notes.
+    """
+
+    def post(self, request, pk):
+        meeting = get_object_or_404(Meeting, pk=pk)
+
+        serializer = GenerateSummaryRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        regenerate = serializer.validated_data.get('regenerate', False)
+
+        # 1. Retrieve all transcripts for this meeting
+        transcripts = meeting.files.filter(file_type='transcript').order_by('created_at')
+        if not transcripts.exists():
+            return Response(
+                {"error": "No transcripts found for this meeting. Please click 'Generate Transcripts' first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 2. If not regenerating, check if a summary file already exists and return it
+        if not regenerate:
+            existing_summary = meeting.files.filter(file_type='summary').order_by('-created_at').first()
+            if existing_summary:
+                try:
+                    summary_bytes = get_s3_object_bytes(existing_summary.s3_key)
+                    raw_text = summary_bytes.decode('utf-8', errors='replace')
+                    try:
+                        notes_data = json.loads(raw_text)
+                    except Exception:
+                        notes_data = {
+                            'meeting_summary': raw_text,
+                            'key_discussion_points': [],
+                            'decisions_made': [],
+                            'action_items': [],
+                            'open_questions': [],
+                        }
+
+                    return Response({
+                        'summary_file_id': existing_summary.id,
+                        's3_key': existing_summary.s3_key,
+                        'original_filename': existing_summary.original_filename,
+                        'notes': notes_data,
+                        'meeting_summary': notes_data.get('meeting_summary', ''),
+                        'key_discussion_points': notes_data.get('key_discussion_points', []),
+                        'decisions_made': notes_data.get('decisions_made', []),
+                        'action_items': notes_data.get('action_items', []),
+                        'open_questions': notes_data.get('open_questions', []),
+                        'markdown': format_summary_as_markdown(notes_data) if isinstance(notes_data, dict) else raw_text,
+                        'status': 'completed',
+                        'already_existed': True,
+                        'created_at': existing_summary.created_at,
+                    }, status=status.HTTP_200_OK)
+                except Exception as err:
+                    logger.warning(f"Failed to read existing summary from S3: {err}. Generating new summary...")
+
+        # 3. Retrieve text from S3 for all transcripts and combine
+        combined_parts = []
+        for idx, t in enumerate(transcripts, 1):
+            audio_name = t.audio_file.original_filename if t.audio_file else (t.original_filename or f"Audio #{idx}")
+            try:
+                t_bytes = get_s3_object_bytes(t.s3_key)
+                t_text = t_bytes.decode('utf-8', errors='replace').strip()
+                if t_text:
+                    combined_parts.append(f"=== Audio File {idx}: {audio_name} ===\n{t_text}")
+            except Exception as err:
+                logger.error(f"Failed to read transcript file {t.id} from S3: {err}")
+
+        if not combined_parts:
+            return Response(
+                {"error": "Failed to read transcript text from S3 storage."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        combined_text = "\n\n".join(combined_parts)
+
+        # 4. Call Groq LLM API
+        try:
+            result = generate_notes_from_transcript_text(combined_text)
+        except SummaryConfigurationError as err:
+            return Response({"error": str(err)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except SummaryAuthenticationError:
+            return Response(
+                {"error": "Groq authentication failed. Please verify GROQ_API_KEY in backend environment."},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        except SummaryRateLimitError:
+            return Response(
+                {"error": "Groq rate limit exceeded. Please try again shortly."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+        except SummaryTimeoutError:
+            return Response(
+                {"error": "Groq request timed out. Please try again."},
+                status=status.HTTP_504_GATEWAY_TIMEOUT
+            )
+        except SummaryBadRequestError as err:
+            return Response(
+                {"error": f"Invalid summary request: {str(err)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except SummaryServiceError:
+            return Response(
+                {"error": "Groq service is temporarily unavailable. Please try again later."},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        except SummaryError as err:
+            return Response(
+                {"error": f"Meeting notes generation failed: {str(err)}"},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        except Exception as err:
+            logger.error(f"Unexpected error in summary generation: {err}")
+            return Response(
+                {"error": "An unexpected error occurred while generating meeting notes."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # 5. Save generated notes to S3 as UTF-8 JSON file
+        summary_filename = f"meeting_{meeting.id}_notes.json"
+        try:
+            summary_s3_key = generate_s3_key(
+                meeting_id=meeting.id,
+                file_type='summary',
+                content_type='application/json',
+                original_filename=summary_filename
+            )
+            json_bytes = json.dumps(result['notes'], indent=2).encode('utf-8')
+            upload_s3_object_bytes(
+                s3_key=summary_s3_key,
+                data=json_bytes,
+                content_type='application/json; charset=utf-8'
+            )
+        except Exception as err:
+            logger.error(f"Failed to upload summary to S3 for meeting {meeting.id}: {err}")
+            return Response(
+                {"error": "Failed to upload generated notes to S3 storage."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # 6. Create MeetingFile record in SQLite
+        try:
+            summary_file = MeetingFile.objects.create(
+                meeting=meeting,
+                file_type='summary',
+                s3_key=summary_s3_key,
+                original_filename=summary_filename
+            )
+        except Exception as err:
+            logger.error(f"Failed to save MeetingFile summary record: {err}. Cleaning up S3 object...")
+            delete_s3_object(summary_s3_key)
+            return Response(
+                {"error": "Failed to persist summary metadata in database."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response({
+            'summary_file_id': summary_file.id,
+            's3_key': summary_s3_key,
+            'original_filename': summary_filename,
+            'notes': result['notes'],
+            'meeting_summary': result['meeting_summary'],
+            'key_discussion_points': result['key_discussion_points'],
+            'decisions_made': result['decisions_made'],
+            'action_items': result['action_items'],
+            'open_questions': result['open_questions'],
+            'markdown': result['markdown'],
+            'status': 'completed',
+            'created_at': summary_file.created_at,
+        }, status=status.HTTP_200_OK)
+
+    def get(self, request, pk):
+        meeting = get_object_or_404(Meeting, pk=pk)
+        summary_file = meeting.files.filter(file_type='summary').order_by('-created_at').first()
+        if not summary_file:
+            return Response({
+                'exists': False,
+                'notes': None,
+                'message': 'No saved meeting notes exist for this meeting.',
+            }, status=status.HTTP_200_OK)
+
+        try:
+            bytes_data = get_s3_object_bytes(summary_file.s3_key)
+            raw_text = bytes_data.decode('utf-8', errors='replace')
+            try:
+                notes_data = json.loads(raw_text)
+            except Exception:
+                notes_data = {
+                    'meeting_summary': raw_text,
+                    'key_discussion_points': [],
+                    'decisions_made': [],
+                    'action_items': [],
+                    'open_questions': [],
+                }
+        except Exception as err:
+            logger.error(f"Failed to fetch summary from S3 ({summary_file.s3_key}): {err}")
+            return Response(
+                {"error": "Failed to retrieve meeting notes from S3 storage."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response({
+            'exists': True,
+            'summary_file_id': summary_file.id,
+            's3_key': summary_file.s3_key,
+            'original_filename': summary_file.original_filename,
+            'notes': notes_data,
+            'meeting_summary': notes_data.get('meeting_summary', '') if isinstance(notes_data, dict) else '',
+            'key_discussion_points': notes_data.get('key_discussion_points', []) if isinstance(notes_data, dict) else [],
+            'decisions_made': notes_data.get('decisions_made', []) if isinstance(notes_data, dict) else [],
+            'action_items': notes_data.get('action_items', []) if isinstance(notes_data, dict) else [],
+            'open_questions': notes_data.get('open_questions', []) if isinstance(notes_data, dict) else [],
+            'markdown': format_summary_as_markdown(notes_data) if isinstance(notes_data, dict) else raw_text,
+            'created_at': summary_file.created_at,
+        }, status=status.HTTP_200_OK)
+

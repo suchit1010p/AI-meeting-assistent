@@ -1037,3 +1037,176 @@ class MeetingTranscribeAPITestCase(APITestCase):
         self.assertEqual(MeetingFile.objects.filter(meeting=self.meeting1, file_type='transcript').count(), 1)
         # Deepgram service was only called once, not twice
         self.assertEqual(mock_transcribe.call_count, 1)
+
+
+@override_settings(
+    AWS_ACCESS_KEY_ID='TEST_KEY',
+    AWS_SECRET_ACCESS_KEY='TEST_SECRET',
+    AWS_STORAGE_BUCKET_NAME='aimeeting-assistant',
+    AWS_S3_REGION_NAME='ap-south-1',
+    DEEPGRAM_API_KEY='test_deepgram_key',
+    GROQ_API_KEY='test_groq_key'
+)
+class BatchTranscriptionAndSummaryAPITestCase(APITestCase):
+    """Integration test suite for batch transcription, transcript retrieval, and Groq summary generation."""
+
+    def setUp(self):
+        self.meeting = Meeting.objects.create(title="Q4 Sprint Planning")
+        self.audio1 = MeetingFile.objects.create(
+            meeting=self.meeting,
+            file_type='audio',
+            s3_key='meetings/1/audio/rec1.webm',
+            original_filename='recording_part1.webm'
+        )
+        self.audio2 = MeetingFile.objects.create(
+            meeting=self.meeting,
+            file_type='audio',
+            s3_key='meetings/1/audio/rec2.webm',
+            original_filename='recording_part2.webm'
+        )
+
+    def test_batch_transcribe_empty_meeting(self):
+        """Meeting without audio files returns 400."""
+        empty_meeting = Meeting.objects.create(title="Empty Meeting")
+        res = self.client.post(f'/api/meetings/{empty_meeting.id}/generate-transcripts/', {}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('No audio files found', res.data['error'])
+
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    @patch('meetings.views.upload_s3_object_bytes')
+    def test_batch_transcribe_multiple_audio_files(
+        self,
+        mock_upload_s3,
+        mock_transcribe,
+        mock_check_s3
+    ):
+        """Processes all audio files, associates transcripts with audio files, and returns 200."""
+        mock_check_s3.return_value = True
+        mock_transcribe.side_effect = [
+            {'transcript': 'First part transcript.', 'words_count': 3, 'language': 'multi'},
+            {'transcript': 'Second part transcript.', 'words_count': 3, 'language': 'multi'},
+        ]
+
+        res = self.client.post(f'/api/meetings/{self.meeting.id}/generate-transcripts/', {}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['total'], 2)
+        self.assertEqual(res.data['successful'], 2)
+        self.assertEqual(len(res.data['results']), 2)
+
+        # Transcripts exist and are linked to audio files
+        transcripts = MeetingFile.objects.filter(meeting=self.meeting, file_type='transcript').order_by('id')
+        self.assertEqual(transcripts.count(), 2)
+        self.assertEqual(transcripts[0].audio_file, self.audio1)
+        self.assertEqual(transcripts[1].audio_file, self.audio2)
+
+        # Repeated call does not duplicate
+        res_repeat = self.client.post(f'/api/meetings/{self.meeting.id}/generate-transcripts/', {}, format='json')
+        self.assertEqual(res_repeat.status_code, status.HTTP_200_OK)
+        self.assertEqual(MeetingFile.objects.filter(meeting=self.meeting, file_type='transcript').count(), 2)
+
+    @patch('meetings.views.get_s3_object_bytes')
+    def test_transcripts_list_and_detail_content(self, mock_get_s3_bytes):
+        """Listing and reading transcript content from S3."""
+        t_file = MeetingFile.objects.create(
+            meeting=self.meeting,
+            audio_file=self.audio1,
+            file_type='transcript',
+            s3_key='meetings/1/transcripts/rec1_transcript.txt',
+            original_filename='recording_part1_transcript.txt'
+        )
+        mock_get_s3_bytes.return_value = "Hello world transcript text from S3.".encode('utf-8')
+
+        # List
+        res_list = self.client.get(f'/api/meetings/{self.meeting.id}/transcripts/')
+        self.assertEqual(res_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_list.data), 1)
+        self.assertEqual(res_list.data[0]['original_audio_filename'], 'recording_part1.webm')
+
+        # Detail content
+        res_detail = self.client.get(f'/api/meetings/{self.meeting.id}/transcripts/{t_file.id}/')
+        self.assertEqual(res_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_detail.data['content'], "Hello world transcript text from S3.")
+        self.assertEqual(res_detail.data['original_audio_filename'], 'recording_part1.webm')
+
+    def test_generate_summary_no_transcripts_error(self):
+        """Generating notes with no transcripts returns 400."""
+        res = self.client.post(f'/api/meetings/{self.meeting.id}/generate-summary/', {}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('No transcripts found', res.data['error'])
+
+    @patch('meetings.views.get_s3_object_bytes')
+    @patch('meetings.views.generate_notes_from_transcript_text')
+    @patch('meetings.views.upload_s3_object_bytes')
+    def test_generate_summary_and_get_summary_success(
+        self,
+        mock_upload_s3,
+        mock_generate_notes,
+        mock_get_s3_bytes
+    ):
+        """Complete workflow for generating structured notes and retrieving from S3."""
+        t1 = MeetingFile.objects.create(
+            meeting=self.meeting,
+            audio_file=self.audio1,
+            file_type='transcript',
+            s3_key='meetings/1/transcripts/t1.txt',
+            original_filename='part1_transcript.txt'
+        )
+        t2 = MeetingFile.objects.create(
+            meeting=self.meeting,
+            audio_file=self.audio2,
+            file_type='transcript',
+            s3_key='meetings/1/transcripts/t2.txt',
+            original_filename='part2_transcript.txt'
+        )
+
+        mock_get_s3_bytes.side_effect = [
+            b"Discussion about architecture and timeline.",
+            b"Agreed to deploy on Friday. David is assigned.",
+        ]
+
+        mock_generate_notes.return_value = {
+            'notes': {
+                'meeting_summary': 'Sprint planning finalized timeline and deployment.',
+                'key_discussion_points': ['Timeline', 'AWS Deployment'],
+                'decisions_made': ['Deploy on Friday'],
+                'action_items': [{'task': 'Deploy to AWS', 'owner': 'David', 'deadline': 'Friday 5 PM'}],
+                'open_questions': ['Who reviews PR?'],
+            },
+            'meeting_summary': 'Sprint planning finalized timeline and deployment.',
+            'key_discussion_points': ['Timeline', 'AWS Deployment'],
+            'decisions_made': ['Deploy on Friday'],
+            'action_items': [{'task': 'Deploy to AWS', 'owner': 'David', 'deadline': 'Friday 5 PM'}],
+            'open_questions': ['Who reviews PR?'],
+            'markdown': '## Meeting Summary\nSprint planning finalized.',
+            'model': 'llama-3.3-70b-versatile',
+        }
+
+        # POST /generate-summary/
+        res_post = self.client.post(f'/api/meetings/{self.meeting.id}/generate-summary/', {}, format='json')
+        self.assertEqual(res_post.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_post.data['meeting_summary'], 'Sprint planning finalized timeline and deployment.')
+        self.assertEqual(len(res_post.data['action_items']), 1)
+        self.assertEqual(res_post.data['action_items'][0]['owner'], 'David')
+
+        # Verify combined text passed to mock_generate_notes contains references to both audio files
+        mock_generate_notes.assert_called_once()
+        combined_arg = mock_generate_notes.call_args[0][0]
+        self.assertIn('recording_part1.webm', combined_arg)
+        self.assertIn('recording_part2.webm', combined_arg)
+
+        # Verify summary MeetingFile was created
+        summary_file = MeetingFile.objects.get(meeting=self.meeting, file_type='summary')
+        self.assertIsNotNone(summary_file)
+
+        # GET /summary/
+        import json
+        mock_get_s3_bytes.side_effect = None
+        mock_get_s3_bytes.return_value = json.dumps(mock_generate_notes.return_value['notes']).encode('utf-8')
+
+        res_get = self.client.get(f'/api/meetings/{self.meeting.id}/summary/')
+        self.assertEqual(res_get.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_get.data['exists'])
+        self.assertEqual(res_get.data['meeting_summary'], 'Sprint planning finalized timeline and deployment.')
+        self.assertEqual(res_get.data['action_items'][0]['task'], 'Deploy to AWS')
+

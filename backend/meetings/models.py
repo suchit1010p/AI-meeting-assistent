@@ -49,6 +49,14 @@ class MeetingFile(models.Model):
         related_name='files',
         help_text="The meeting this file belongs to"
     )
+    audio_file = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='transcripts',
+        help_text="Original audio file from which this transcript was generated"
+    )
     file_type = models.CharField(
         max_length=20,
         choices=FileType.choices,

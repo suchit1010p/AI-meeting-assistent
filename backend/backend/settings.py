@@ -150,6 +150,11 @@ AWS_S3_PRESIGNED_EXPIRATION = int(os.environ.get('AWS_S3_PRESIGNED_EXPIRATION', 
 DEEPGRAM_API_KEY = os.environ.get('DEEPGRAM_API_KEY')
 
 # ==============================================================================
+# Groq LLM Configuration (for meeting summary generation)
+# ==============================================================================
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+
+# ==============================================================================
 # CORS Configuration for React Frontend
 # ==============================================================================
 CORS_ALLOWED_ORIGIN_REGEXES = [

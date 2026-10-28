@@ -41,8 +41,11 @@ SUPPORTED_FILE_TYPES: Dict[str, Dict[str, Any]] = {
         'folder': 'summaries',
         'allowed_content_types': {
             'text/plain': '.txt',
+            'text/markdown': '.md',
+            'application/json': '.json',
         },
     },
+
 }
 
 # Alias mapping for plural inputs

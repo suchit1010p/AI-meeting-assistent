@@ -3,6 +3,7 @@ import meetingsApi from './api/meetingsApi'
 import Sidebar from './components/Sidebar'
 import WorkspaceHeader from './components/WorkspaceHeader'
 import MeetingAudioCard from './components/MeetingAudioCard'
+import GenerateTranscriptsAction from './components/GenerateTranscriptsAction'
 import MeetingTranscriptCard from './components/MeetingTranscriptCard'
 import GenerateNotesAction from './components/GenerateNotesAction'
 import MeetingNotesCard from './components/MeetingNotesCard'
@@ -26,8 +27,20 @@ export default function App() {
   const [activeMeetingDetails, setActiveMeetingDetails] = useState(null)
   const [isLoadingDetails, setIsLoadingDetails] = useState(false)
 
-  // Cache for text content of transcripts and summaries fetched from S3 presigned URLs: { [fileId]: string }
+  // Cache for text content of transcripts and summaries fetched from S3: { [fileId]: string }
   const [fileContents, setFileContents] = useState({})
+
+  // Active structured notes state from Groq LLM
+  const [activeStructuredNote, setActiveStructuredNote] = useState(null)
+
+  // Transcription state
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState(false)
+  const [transcribeStatusMessage, setTranscribeStatusMessage] = useState(null)
+  const [transcribeErrorMessage, setTranscribeErrorMessage] = useState(null)
+
+  // Notes generation state
+  const [isGeneratingNotes, setIsGeneratingNotes] = useState(false)
+  const [generateNotesErrorMessage, setGenerateNotesErrorMessage] = useState(null)
 
   // Draft session state for "New Meeting" before persisting
   const [draftSession, setDraftSession] = useState({
@@ -38,10 +51,6 @@ export default function App() {
 
   // Global recording state indicator
   const [isRecordingAudio, setIsRecordingAudio] = useState(false)
-
-  // Generate notes processing states
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [demoNotice, setDemoNotice] = useState(false)
 
   // Sidebar state
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
@@ -105,11 +114,12 @@ export default function App() {
   }, [])
 
   // -------------------------------------------------------------
-  // Load meeting details and files whenever active selection changes
+  // Load meeting details, files, and saved notes whenever active selection changes
   // -------------------------------------------------------------
   const loadMeetingDetails = useCallback(async (meetingId) => {
     if (!meetingId) {
       setActiveMeetingDetails(null)
+      setActiveStructuredNote(null)
       return
     }
 
@@ -118,7 +128,19 @@ export default function App() {
       const details = await meetingsApi.getMeeting(meetingId)
       setActiveMeetingDetails(details)
 
-      // Fetch text content for any transcript and summary files
+      // 1. Fetch saved notes from backend/S3 if present
+      try {
+        const summaryData = await meetingsApi.getSummary(meetingId)
+        if (summaryData && summaryData.exists) {
+          setActiveStructuredNote(summaryData)
+        } else {
+          setActiveStructuredNote(null)
+        }
+      } catch (err) {
+        console.warn(`[MeetNote AI] Could not fetch summary for meeting ${meetingId}:`, err)
+      }
+
+      // 2. Fetch text content for transcripts from S3 presigned URLs
       if (details.files && details.files.length > 0) {
         details.files.forEach(async (file) => {
           if (
@@ -145,8 +167,12 @@ export default function App() {
   useEffect(() => {
     if (activeSelection?.meetingId) {
       loadMeetingDetails(activeSelection.meetingId)
+      setTranscribeStatusMessage(null)
+      setTranscribeErrorMessage(null)
+      setGenerateNotesErrorMessage(null)
     } else {
       setActiveMeetingDetails(null)
+      setActiveStructuredNote(null)
     }
   }, [activeSelection?.meetingId, loadMeetingDetails])
 
@@ -197,6 +223,8 @@ export default function App() {
             id: f.id,
             fileId: f.id,
             name: f.original_filename || `Transcript ${f.id}`,
+            original_filename: f.original_filename,
+            originalAudioFilename: f.original_audio_filename || 'Audio Recording',
             text: text || 'Loading transcript from S3...',
             preview: text ? text.slice(0, 140) + '...' : 'Loading transcript from S3...',
             wordCount: text ? text.trim().split(/\s+/).filter(Boolean).length : 0,
@@ -231,12 +259,14 @@ export default function App() {
   const handleNewMeeting = () => {
     setActiveSelection(null)
     setActiveMeetingDetails(null)
-    setDemoNotice(false)
+    setActiveStructuredNote(null)
+    setTranscribeStatusMessage(null)
+    setTranscribeErrorMessage(null)
+    setGenerateNotesErrorMessage(null)
   }
 
   const handleSelectMeeting = (meetingId) => {
     setActiveSelection({ meetingId, childType: 'overview' })
-    setDemoNotice(false)
     setExpandedFolderIds((prev) => {
       const next = new Set(prev)
       next.add(meetingId)
@@ -246,7 +276,6 @@ export default function App() {
 
   const handleSelectChildItem = (meetingId, childType) => {
     setActiveSelection({ meetingId, childType })
-    setDemoNotice(false)
 
     // Smooth-scroll to target section
     setTimeout(() => {
@@ -298,34 +327,34 @@ export default function App() {
 
     // 2. Format filename and determine MIME type
     const rawMime = pendingAudioData.blob?.type || 'audio/webm'
-    const cleanMime = rawMime.split(';')[0] || 'audio/webm'
-    const ext = cleanMime.includes('wav')
-      ? '.wav'
-      : cleanMime.includes('mp4')
-      ? '.mp4'
-      : cleanMime.includes('mpeg')
-      ? '.mp3'
-      : '.webm'
-    const filename = `recording_${Date.now()}${ext}`
+    const contentType = rawMime.split(';')[0].trim() || 'audio/webm'
+    const ext = contentType.includes('wav')
+      ? 'wav'
+      : contentType.includes('mpeg') || contentType.includes('mp3')
+      ? 'mp3'
+      : 'webm'
 
-    // 3. Request presigned upload URL from Django backend
+    const timestampStr = new Date().toISOString().replace(/[:.]/g, '-')
+    const filename = `recording_${timestampStr}.${ext}`
+
+    // 3. Request presigned upload URL from Django
     const uploadData = await meetingsApi.getUploadUrl(targetMeetingId, {
       file_type: 'audio',
-      content_type: cleanMime,
+      content_type: contentType,
       filename,
     })
 
-    // 4. Upload raw audio Blob directly to AWS S3 using presigned PUT URL
-    await meetingsApi.uploadToS3(uploadData.upload_url, pendingAudioData.blob, uploadData.content_type)
+    // 4. Upload raw blob directly from browser to private AWS S3
+    await meetingsApi.uploadToS3(uploadData.upload_url, pendingAudioData.blob, contentType)
 
-    // 5. Confirm upload with Django and persist metadata in SQLite
+    // 5. Confirm file upload with Django backend
     await meetingsApi.confirmFile(targetMeetingId, {
       s3_key: uploadData.s3_key,
       file_type: 'audio',
       original_filename: filename,
     })
 
-    // 6. Refresh active meeting details from Django
+    // 6. Refresh details
     await loadMeetingDetails(targetMeetingId)
     const updatedMeetings = await meetingsApi.listMeetings()
     setMeetings(updatedMeetings)
@@ -346,55 +375,82 @@ export default function App() {
   }
 
   // -------------------------------------------------------------
-  // Transcript Upload Workflow (S3 + SQLite)
+  // Generate Transcripts with Deepgram
   // -------------------------------------------------------------
-  const handleSubmitTranscript = async (text) => {
-    let targetMeetingId = activeSelection?.meetingId
-
-    // 1. If in "New Meeting" mode, create meeting in Django first
+  const handleGenerateTranscripts = async () => {
+    const targetMeetingId = activeSelection?.meetingId
     if (!targetMeetingId) {
-      const dateStr = new Date().toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
+      setTranscribeErrorMessage('Please select a meeting with audio recordings first.')
+      return
+    }
+
+    if (currentRecordings.length === 0) {
+      setTranscribeErrorMessage('No audio recordings found for this meeting. Please record audio first.')
+      return
+    }
+
+    setIsTranscribingAudio(true)
+    setTranscribeStatusMessage(null)
+    setTranscribeErrorMessage(null)
+
+    try {
+      const response = await meetingsApi.generateTranscripts(targetMeetingId, {
+        language: 'multi',
+        retranscribe: false,
       })
-      const newMeeting = await meetingsApi.createMeeting(`Meeting — ${dateStr}`)
-      targetMeetingId = newMeeting.id
-      setMeetings((prev) => [newMeeting, ...prev])
-      setActiveSelection({ meetingId: targetMeetingId, childType: 'transcript' })
-      setExpandedFolderIds((prev) => new Set([...prev, targetMeetingId]))
+
+      const successCount = response.successful ?? response.results?.filter((r) => r.status === 'completed' || r.status === 'already_exists').length ?? 0
+      const totalCount = response.total ?? response.results?.length ?? 0
+
+      setTranscribeStatusMessage(
+        response.message || `Transcribed ${successCount} of ${totalCount} audio file(s) with Deepgram.`
+      )
+
+      // Refresh meeting details to display new transcript files
+      await loadMeetingDetails(targetMeetingId)
+      const updatedMeetings = await meetingsApi.listMeetings()
+      setMeetings(updatedMeetings)
+
+      // If any failed, show warning
+      const failed = (response.results || []).filter((r) => r.status === 'failed')
+      if (failed.length > 0) {
+        const failedNames = failed.map((f) => f.audio_filename || `ID ${f.audio_file_id}`).join(', ')
+        setTranscribeErrorMessage(`Some files failed transcription: ${failedNames}`)
+      }
+    } catch (err) {
+      console.error('[MeetNote AI] Transcription error:', err)
+      setTranscribeErrorMessage(err.message || 'Failed to generate transcripts. Please verify backend settings.')
+    } finally {
+      setIsTranscribingAudio(false)
     }
+  }
 
-    const filename = `transcript_${Date.now()}.txt`
-    const textBlob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+  // -------------------------------------------------------------
+  // Open Transcript Content from S3
+  // -------------------------------------------------------------
+  const handleOpenTranscript = async (transcriptId) => {
+    const targetMeetingId = activeSelection?.meetingId
+    if (!targetMeetingId || !transcriptId) return null
 
-    // 2. Request presigned upload URL
-    const uploadData = await meetingsApi.getUploadUrl(targetMeetingId, {
-      file_type: 'transcript',
-      content_type: 'text/plain',
-      filename,
-    })
-
-    // 3. Direct PUT to S3
-    await meetingsApi.uploadToS3(uploadData.upload_url, textBlob, 'text/plain')
-
-    // 4. Confirm with Django
-    const confirmed = await meetingsApi.confirmFile(targetMeetingId, {
-      s3_key: uploadData.s3_key,
-      file_type: 'transcript',
-      original_filename: filename,
-    })
-
-    // Cache text in state
-    if (confirmed?.id) {
-      setFileContents((prev) => ({ ...prev, [confirmed.id]: text }))
+    try {
+      const data = await meetingsApi.getTranscriptContent(targetMeetingId, transcriptId)
+      if (data?.content) {
+        setFileContents((prev) => ({ ...prev, [transcriptId]: data.content }))
+        return {
+          id: data.id,
+          name: data.original_filename,
+          original_filename: data.original_filename,
+          originalAudioFilename: data.original_audio_filename || 'Audio Recording',
+          text: data.content,
+          s3Key: data.s3_key,
+          timestamp: formatFileTimestamp(data.created_at),
+        }
+      }
+    } catch (err) {
+      console.error('[MeetNote AI] Failed to fetch transcript content:', err)
+      throw err
     }
-
-    // 5. Refresh details
-    await loadMeetingDetails(targetMeetingId)
-    const updatedMeetings = await meetingsApi.listMeetings()
-    setMeetings(updatedMeetings)
+    return null
   }
 
   const handleDeleteTranscript = async (fileId) => {
@@ -411,37 +467,63 @@ export default function App() {
     }
   }
 
-  const handleDeleteNote = (noteId) => {
+  // -------------------------------------------------------------
+  // Generate Meeting Notes with Groq LLM
+  // -------------------------------------------------------------
+  const handleGenerateNotes = async () => {
+    const targetMeetingId = activeSelection?.meetingId
+    if (!targetMeetingId) {
+      setGenerateNotesErrorMessage('Please select a meeting with transcripts first.')
+      return
+    }
+
+    if (currentTranscripts.length === 0) {
+      setGenerateNotesErrorMessage('No transcripts found for this meeting. Please click "Generate Transcripts" first.')
+      return
+    }
+
+    setIsGeneratingNotes(true)
+    setGenerateNotesErrorMessage(null)
+
+    try {
+      const result = await meetingsApi.generateSummary(targetMeetingId, { regenerate: true })
+      setActiveStructuredNote(result)
+
+      // Refresh meeting details and list
+      await loadMeetingDetails(targetMeetingId)
+      const updatedMeetings = await meetingsApi.listMeetings()
+      setMeetings(updatedMeetings)
+    } catch (err) {
+      console.error('[MeetNote AI] Failed to generate notes:', err)
+      setGenerateNotesErrorMessage(
+        err.message || 'Failed to generate meeting notes. Please check GROQ_API_KEY in backend .env.'
+      )
+    } finally {
+      setIsGeneratingNotes(false)
+    }
+  }
+
+  const handleDeleteNote = async (noteId) => {
     if (isHistorySession && activeMeeting) {
-      // If note is local or backend file
       if (typeof noteId === 'number') {
-        meetingsApi.deleteFile(activeSelection.meetingId, noteId).then(() => {
-          loadMeetingDetails(activeSelection.meetingId)
-        })
+        try {
+          await meetingsApi.deleteFile(activeSelection.meetingId, noteId)
+          setActiveStructuredNote(null)
+          await loadMeetingDetails(activeSelection.meetingId)
+          const updatedMeetings = await meetingsApi.listMeetings()
+          setMeetings(updatedMeetings)
+        } catch (err) {
+          console.error('Failed to delete note:', err)
+          alert(`Failed to delete note: ${err.message}`)
+        }
       }
     } else {
       setDraftSession((prev) => ({
         ...prev,
         notes: prev.notes.filter((n) => n.id !== noteId),
       }))
+      setActiveStructuredNote(null)
     }
-  }
-
-  // -------------------------------------------------------------
-  // Generate Notes Action (Frontend action preserving existing UI)
-  // -------------------------------------------------------------
-  const canGenerate = currentTranscripts.length > 0 || currentRecordings.length > 0
-
-  const handleGenerateNotes = () => {
-    if (!canGenerate || isGenerating) return
-
-    setIsGenerating(true)
-    setDemoNotice(false)
-
-    setTimeout(() => {
-      setIsGenerating(false)
-      setDemoNotice(true)
-    }, 1200)
   }
 
   // -------------------------------------------------------------
@@ -497,6 +579,7 @@ export default function App() {
         } else {
           setActiveSelection(null)
           setActiveMeetingDetails(null)
+          setActiveStructuredNote(null)
         }
       }
     } catch (err) {
@@ -516,7 +599,7 @@ export default function App() {
 
   if (isRecordingAudio) {
     headerStatus = 'recording'
-  } else if (isGenerating) {
+  } else if (isTranscribingAudio || isGeneratingNotes) {
     headerStatus = 'processing'
   } else if (isHistorySession && activeMeeting) {
     headerTitle = activeMeeting.title
@@ -569,7 +652,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => fetchMeetingsList()}
-              className="inline-flex items-center gap-1 font-semibold underline hover:text-red-950"
+              className="inline-flex items-center gap-1 font-semibold underline hover:text-red-950 cursor-pointer"
             >
               <RefreshCw className="w-3 h-3" />
               <span>Retry Connection</span>
@@ -591,11 +674,22 @@ export default function App() {
               />
             </div>
 
+            {/* 1b. Generate Transcripts Action Button directly below Meeting Audio Card */}
+            <GenerateTranscriptsAction
+              canGenerate={currentRecordings.length > 0}
+              isGenerating={isTranscribingAudio}
+              onGenerateTranscripts={handleGenerateTranscripts}
+              audioCount={currentRecordings.length}
+              transcriptCount={currentTranscripts.length}
+              statusMessage={transcribeStatusMessage}
+              errorMessage={transcribeErrorMessage}
+            />
+
             {/* 2. Meeting Transcript Card */}
             <div id="section-transcript">
               <MeetingTranscriptCard
                 transcripts={currentTranscripts}
-                onSubmitTranscript={handleSubmitTranscript}
+                onOpenTranscript={handleOpenTranscript}
                 onDeleteTranscript={handleDeleteTranscript}
               />
             </div>
@@ -603,11 +697,11 @@ export default function App() {
             {/* 3. Generate Notes Action */}
             <div id="section-generate">
               <GenerateNotesAction
-                canGenerate={canGenerate}
-                isGenerating={isGenerating}
+                canGenerate={currentTranscripts.length > 0}
+                isGenerating={isGeneratingNotes}
                 onGenerateNotes={handleGenerateNotes}
-                demoNotice={demoNotice}
-                onDismissNotice={() => setDemoNotice(false)}
+                hasNotes={Boolean(activeStructuredNote)}
+                errorMessage={generateNotesErrorMessage}
               />
             </div>
 
@@ -615,6 +709,8 @@ export default function App() {
             <div id="section-notes">
               <MeetingNotesCard
                 notes={currentNotes}
+                activeNote={activeStructuredNote}
+                isGenerating={isGeneratingNotes}
                 onDeleteNote={handleDeleteNote}
               />
             </div>

@@ -198,6 +198,57 @@ export const meetingsApi = {
   },
 
   /**
+   * Batch transcribe all audio files for a meeting using Deepgram Nova-3.
+   */
+  async generateTranscripts(meetingId, { language = 'multi', retranscribe = false } = {}) {
+    return apiRequest(`/api/meetings/${meetingId}/generate-transcripts/`, {
+      method: 'POST',
+      body: { language, retranscribe },
+    })
+  },
+
+  /**
+   * Transcribe a single audio file by ID.
+   */
+  async transcribeAudio(meetingId, { audio_file_id, language = 'multi', retranscribe = false } = {}) {
+    return apiRequest(`/api/meetings/${meetingId}/transcribe/`, {
+      method: 'POST',
+      body: { audio_file_id, language, retranscribe },
+    })
+  },
+
+  /**
+   * List saved transcript metadata for a meeting.
+   */
+  async getTranscripts(meetingId) {
+    return apiRequest(`/api/meetings/${meetingId}/transcripts/`)
+  },
+
+  /**
+   * Retrieve transcript text content from private S3 by transcript file ID.
+   */
+  async getTranscriptContent(meetingId, transcriptId) {
+    return apiRequest(`/api/meetings/${meetingId}/transcripts/${transcriptId}/`)
+  },
+
+  /**
+   * Generate structured meeting notes from all transcripts using Groq LLM API.
+   */
+  async generateSummary(meetingId, { regenerate = false } = {}) {
+    return apiRequest(`/api/meetings/${meetingId}/generate-summary/`, {
+      method: 'POST',
+      body: { regenerate },
+    })
+  },
+
+  /**
+   * Retrieve saved meeting notes from S3.
+   */
+  async getSummary(meetingId) {
+    return apiRequest(`/api/meetings/${meetingId}/summary/`)
+  },
+
+  /**
    * Fetch UTF-8 text content directly from a presigned S3 GET URL.
    */
   async fetchTextFromS3(presignedGetUrl) {
