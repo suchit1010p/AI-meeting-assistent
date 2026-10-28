@@ -1,5 +1,6 @@
 import re
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
+import requests
 from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -10,6 +11,19 @@ from meetings.s3_utils import (
     generate_presigned_upload_url,
     generate_presigned_download_url,
     SUPPORTED_FILE_TYPES,
+)
+from meetings.transcription_service import (
+    transcribe_audio_bytes,
+    transcribe_audio_from_s3,
+    get_deepgram_api_key,
+    resolve_audio_content_type,
+    TranscriptionError,
+    TranscriptionConfigurationError,
+    TranscriptionAuthenticationError,
+    TranscriptionRateLimitError,
+    TranscriptionTimeoutError,
+    TranscriptionBadRequestError,
+    TranscriptionServiceError,
 )
 
 
@@ -372,3 +386,569 @@ class MeetingAPITestCase(APITestCase):
         """GET /api/meetings/<id>/files/ for nonexistent meeting should return 404."""
         response = self.client.get('/api/meetings/999999/files/')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+# ==============================================================================
+# Step 3: Audio Transcription Tests
+# ==============================================================================
+
+@override_settings(DEEPGRAM_API_KEY='dummy-deepgram-key')
+class TranscriptionServiceTestCase(TestCase):
+    """Unit tests for the Deepgram Nova-3 transcription service."""
+
+    def test_get_deepgram_api_key_success(self):
+        """Verify API key is retrieved from settings."""
+        self.assertEqual(get_deepgram_api_key(), 'dummy-deepgram-key')
+
+    @override_settings(DEEPGRAM_API_KEY='')
+    def test_get_deepgram_api_key_missing_raises_error(self):
+        """Verify missing API key raises TranscriptionConfigurationError."""
+        with patch.dict('os.environ', {'DEEPGRAM_API_KEY': ''}):
+            with self.assertRaises(TranscriptionConfigurationError):
+                get_deepgram_api_key()
+
+    def test_resolve_audio_content_type(self):
+        """Verify MIME inference from S3 file extensions."""
+        self.assertEqual(resolve_audio_content_type('meetings/1/audio/rec.webm'), 'audio/webm')
+        self.assertEqual(resolve_audio_content_type('meetings/1/audio/rec.wav'), 'audio/wav')
+        self.assertEqual(resolve_audio_content_type('meetings/1/audio/rec.mp3'), 'audio/mpeg')
+        self.assertEqual(resolve_audio_content_type('meetings/1/audio/rec.m4a'), 'audio/mp4')
+
+    def test_transcribe_audio_bytes_empty_rejected(self):
+        """Verify empty audio bytes raise TranscriptionBadRequestError."""
+        with self.assertRaises(TranscriptionBadRequestError):
+            transcribe_audio_bytes(b'')
+
+    @patch('meetings.transcription_service.requests.post')
+    def test_transcribe_audio_bytes_success(self, mock_post):
+        """Verify successful transcription returns formatted text and metadata."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'results': {
+                'channels': [{
+                    'alternatives': [{
+                        'transcript': 'Namaste, this is an important meeting.',
+                        'confidence': 0.97,
+                        'words': [{'word': 'Namaste'}, {'word': 'this'}, {'word': 'is'}],
+                        'paragraphs': {
+                            'transcript': 'Namaste, this is an important meeting.'
+                        }
+                    }]
+                }]
+            }
+        }
+        mock_post.return_value = mock_response
+
+        audio_data = b'fake-binary-audio-stream'
+        result = transcribe_audio_bytes(audio_data, content_type='audio/webm', language='multi')
+
+        self.assertEqual(result['transcript'], 'Namaste, this is an important meeting.')
+        self.assertEqual(result['confidence'], 0.97)
+        self.assertEqual(result['words_count'], 3)
+        self.assertEqual(result['model'], 'nova-3')
+        self.assertEqual(result['language'], 'multi')
+
+        # Verify Deepgram request params
+        mock_post.assert_called_once()
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs['params']['model'], 'nova-3')
+        self.assertEqual(kwargs['params']['language'], 'multi')
+        self.assertEqual(kwargs['params']['smart_format'], 'true')
+        self.assertEqual(kwargs['params']['punctuate'], 'true')
+
+    @patch('meetings.transcription_service.requests.post')
+    def test_transcribe_language_settings_gujarati_hindi_english(self, mock_post):
+        """Verify language configurations for Gujarati, Hindi, and English."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'results': {
+                'channels': [{
+                    'alternatives': [{'transcript': 'Sample speech text'}]
+                }]
+            }
+        }
+        mock_post.return_value = mock_response
+
+        # Gujarati
+        transcribe_audio_bytes(b'audio-bytes', language='gu')
+        self.assertEqual(mock_post.call_args[1]['params']['language'], 'gu')
+
+        # Hindi
+        transcribe_audio_bytes(b'audio-bytes', language='hi')
+        self.assertEqual(mock_post.call_args[1]['params']['language'], 'hi')
+
+        # English
+        transcribe_audio_bytes(b'audio-bytes', language='en')
+        self.assertEqual(mock_post.call_args[1]['params']['language'], 'en')
+
+        # Multilingual code-switching
+        transcribe_audio_bytes(b'audio-bytes', language='multi')
+        self.assertEqual(mock_post.call_args[1]['params']['language'], 'multi')
+
+    @patch('meetings.transcription_service.requests.post')
+    def test_transcribe_empty_transcription_result(self, mock_post):
+        """Verify handling when Deepgram detects no speech (empty transcript)."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'results': {
+                'channels': [{
+                    'alternatives': [{
+                        'transcript': '',
+                        'confidence': 0.0,
+                        'words': []
+                    }]
+                }]
+            }
+        }
+        mock_post.return_value = mock_response
+
+        result = transcribe_audio_bytes(b'audio-silence')
+        self.assertEqual(result['transcript'], '')
+        self.assertEqual(result['words_count'], 0)
+
+    @patch('meetings.transcription_service.requests.post')
+    def test_transcribe_deepgram_error_mappings(self, mock_post):
+        """Verify Deepgram HTTP errors map to proper custom exceptions."""
+        # 401 Unauthorized
+        mock_resp_401 = MagicMock(status_code=401, text='Invalid API Key')
+        mock_post.return_value = mock_resp_401
+        with self.assertRaises(TranscriptionAuthenticationError):
+            transcribe_audio_bytes(b'audio-data')
+
+        # 429 Rate Limit
+        mock_resp_429 = MagicMock(status_code=429, text='Rate limited')
+        mock_post.return_value = mock_resp_429
+        with self.assertRaises(TranscriptionRateLimitError):
+            transcribe_audio_bytes(b'audio-data')
+
+        # 400 Bad Request
+        mock_resp_400 = MagicMock(status_code=400, text='Invalid payload')
+        mock_resp_400.json.return_value = {'err_msg': 'Invalid payload'}
+        mock_post.return_value = mock_resp_400
+        with self.assertRaises(TranscriptionBadRequestError):
+            transcribe_audio_bytes(b'audio-data')
+
+        # 500 Service Error
+        mock_resp_500 = MagicMock(status_code=500, text='Server Error')
+        mock_post.return_value = mock_resp_500
+        with self.assertRaises(TranscriptionServiceError):
+            transcribe_audio_bytes(b'audio-data')
+
+        # Timeout
+        mock_post.side_effect = requests.exceptions.Timeout("Connection timeout")
+        with self.assertRaises(TranscriptionTimeoutError):
+            transcribe_audio_bytes(b'audio-data')
+
+
+@override_settings(
+    AWS_ACCESS_KEY_ID='TEST_KEY_ID',
+    AWS_SECRET_ACCESS_KEY='TEST_SECRET_KEY',
+    AWS_STORAGE_BUCKET_NAME='aimeeting-assistant',
+    AWS_S3_REGION_NAME='us-east-1',
+    AWS_S3_PRESIGNED_EXPIRATION=300,
+    DEEPGRAM_API_KEY='test-deepgram-api-key'
+)
+class MeetingTranscribeAPITestCase(APITestCase):
+    """Test suite for POST /api/meetings/<id>/transcribe/ endpoint."""
+
+    def setUp(self):
+        self.meeting1 = Meeting.objects.create(title="Sprint Planning & Review")
+        self.meeting2 = Meeting.objects.create(title="Design Sync")
+
+        # Audio file attached to meeting1
+        self.audio_file1 = MeetingFile.objects.create(
+            meeting=self.meeting1,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting1.id}/audio/rec_01.webm",
+            original_filename="rec_01.webm"
+        )
+
+    # --------------------------------------------------------------------------
+    # 1. Successful Transcription & Transcript Storage
+    # --------------------------------------------------------------------------
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    @patch('meetings.views.upload_s3_object_bytes')
+    def test_transcribe_success_auto_single_audio(
+        self,
+        mock_upload_s3,
+        mock_transcribe,
+        mock_check_s3
+    ):
+        """POST /api/meetings/<id>/transcribe/ with single audio auto-selects and stores transcript."""
+        mock_check_s3.return_value = True
+        mock_transcribe.return_value = {
+            'transcript': 'Welcome team. We are discussing Q3 roadmap items.',
+            'confidence': 0.98,
+            'words_count': 8,
+            'language': 'multi',
+            'model': 'nova-3',
+        }
+
+        response = self.client.post(
+            f'/api/meetings/{self.meeting1.id}/transcribe/',
+            {},
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'completed')
+        self.assertEqual(response.data['transcript'], 'Welcome team. We are discussing Q3 roadmap items.')
+        self.assertIn('transcript_file_id', response.data)
+        self.assertTrue(response.data['s3_key'].startswith(f"meetings/{self.meeting1.id}/transcripts/"))
+        self.assertEqual(response.data['original_filename'], 'rec_01_transcript.txt')
+
+        # Verify DB record created
+        transcript_file = MeetingFile.objects.get(id=response.data['transcript_file_id'])
+        self.assertEqual(transcript_file.file_type, 'transcript')
+        self.assertEqual(transcript_file.meeting_id, self.meeting1.id)
+        self.assertEqual(transcript_file.s3_key, response.data['s3_key'])
+
+        # Verify S3 upload called
+        mock_upload_s3.assert_called_once()
+        upload_call = mock_upload_s3.call_args
+        self.assertEqual(upload_call[1]['s3_key'], response.data['s3_key'])
+        self.assertEqual(upload_call[1]['data'], b'Welcome team. We are discussing Q3 roadmap items.')
+        self.assertEqual(upload_call[1]['content_type'], 'text/plain; charset=utf-8')
+
+    # --------------------------------------------------------------------------
+    # 2. Language Settings (Gujarati, Hindi, English, Multilingual)
+    # --------------------------------------------------------------------------
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    @patch('meetings.views.upload_s3_object_bytes')
+    def test_transcribe_language_settings(
+        self,
+        mock_upload_s3,
+        mock_transcribe,
+        mock_check_s3
+    ):
+        """POST /api/meetings/<id>/transcribe/ correctly forwards language codes to service."""
+        mock_check_s3.return_value = True
+
+        for lang in ['gu', 'hi', 'en', 'multi']:
+            mock_transcribe.return_value = {
+                'transcript': f'Transcription in {lang}',
+                'confidence': 0.99,
+                'words_count': 3,
+                'language': lang,
+                'model': 'nova-3',
+            }
+
+            response = self.client.post(
+                f'/api/meetings/{self.meeting1.id}/transcribe/',
+                {'language': lang, 'retranscribe': True},
+                format='json'
+            )
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(mock_transcribe.call_args[1]['language'], lang)
+
+    # --------------------------------------------------------------------------
+    # 3. Multiple Audio Files Handling
+    # --------------------------------------------------------------------------
+    def test_transcribe_multiple_audio_files_without_id_returns_400(self):
+        """POST /api/meetings/<id>/transcribe/ returns 400 when multiple audios exist without audio_file_id."""
+        # Add second audio file to meeting1
+        MeetingFile.objects.create(
+            meeting=self.meeting1,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting1.id}/audio/rec_02.webm",
+            original_filename="rec_02.webm"
+        )
+
+        response = self.client.post(
+            f'/api/meetings/{self.meeting1.id}/transcribe/',
+            {},
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Multiple audio files exist', response.data['error'])
+
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    @patch('meetings.views.upload_s3_object_bytes')
+    def test_transcribe_multiple_audio_files_with_explicit_id_succeeds(
+        self,
+        mock_upload_s3,
+        mock_transcribe,
+        mock_check_s3
+    ):
+        """POST /api/meetings/<id>/transcribe/ succeeds when specific audio_file_id is provided."""
+        audio_file2 = MeetingFile.objects.create(
+            meeting=self.meeting1,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting1.id}/audio/rec_02.webm",
+            original_filename="rec_02.webm"
+        )
+
+        mock_check_s3.return_value = True
+        mock_transcribe.return_value = {
+            'transcript': 'Selected audio 2 transcribed.',
+            'confidence': 0.95,
+            'words_count': 4,
+            'language': 'multi',
+            'model': 'nova-3',
+        }
+
+        response = self.client.post(
+            f'/api/meetings/{self.meeting1.id}/transcribe/',
+            {'audio_file_id': audio_file2.id},
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_transcribe.call_args[1]['s3_key'], audio_file2.s3_key)
+
+    # --------------------------------------------------------------------------
+    # 4. Audio Verification & File Ownership
+    # --------------------------------------------------------------------------
+    @patch('meetings.views.check_s3_object_exists')
+    def test_transcribe_missing_audio_object_in_s3_returns_400(self, mock_check_s3):
+        """POST /api/meetings/<id>/transcribe/ returns 400 when S3 audio object is missing."""
+        mock_check_s3.return_value = False
+
+        response = self.client.post(
+            f'/api/meetings/{self.meeting1.id}/transcribe/',
+            {},
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('does not exist in S3', response.data['error'])
+
+    def test_transcribe_invalid_audio_file_id_returns_404(self):
+        """POST /api/meetings/<id>/transcribe/ with nonexistent audio_file_id returns 404."""
+        response = self.client.post(
+            f'/api/meetings/{self.meeting1.id}/transcribe/',
+            {'audio_file_id': 999999},
+            format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_transcribe_audio_file_belongs_to_different_meeting_returns_400(self):
+        """POST /api/meetings/<id>/transcribe/ rejects audio file belonging to another meeting."""
+        file_m2 = MeetingFile.objects.create(
+            meeting=self.meeting2,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting2.id}/audio/m2.webm",
+            original_filename="m2.webm"
+        )
+
+        response = self.client.post(
+            f'/api/meetings/{self.meeting1.id}/transcribe/',
+            {'audio_file_id': file_m2.id},
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('does not belong to meeting', response.data['error'])
+
+    def test_transcribe_file_not_audio_type_returns_400(self):
+        """POST /api/meetings/<id>/transcribe/ rejects file when file_type is not 'audio'."""
+        txt_file = MeetingFile.objects.create(
+            meeting=self.meeting1,
+            file_type='transcript',
+            s3_key=f"meetings/{self.meeting1.id}/transcripts/doc.txt",
+            original_filename="doc.txt"
+        )
+
+        response = self.client.post(
+            f'/api/meetings/{self.meeting1.id}/transcribe/',
+            {'audio_file_id': txt_file.id},
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("expected 'audio'", response.data['error'])
+
+    def test_transcribe_meeting_without_any_audio_returns_404(self):
+        """POST /api/meetings/<id>/transcribe/ returns 404 when meeting has 0 audio files."""
+        empty_meeting = Meeting.objects.create(title="Empty Meeting")
+        response = self.client.post(
+            f'/api/meetings/{empty_meeting.id}/transcribe/',
+            {},
+            format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_transcribe_nonexistent_meeting_returns_404(self):
+        """POST /api/meetings/<id>/transcribe/ returns 404 when meeting ID does not exist."""
+        response = self.client.post('/api/meetings/999999/transcribe/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    # --------------------------------------------------------------------------
+    # 5. Deepgram API Failures, Timeouts, Missing Key
+    # --------------------------------------------------------------------------
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    def test_transcribe_missing_deepgram_api_key_returns_500(self, mock_transcribe, mock_check_s3):
+        """POST /api/meetings/<id>/transcribe/ returns 500 when Deepgram API key is missing."""
+        mock_check_s3.return_value = True
+        mock_transcribe.side_effect = TranscriptionConfigurationError("No API key")
+
+        response = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertIn('API key is not configured', response.data['error'])
+
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    def test_transcribe_deepgram_auth_failure_returns_502(self, mock_transcribe, mock_check_s3):
+        """POST /api/meetings/<id>/transcribe/ returns 502 when Deepgram rejects authentication."""
+        mock_check_s3.return_value = True
+        mock_transcribe.side_effect = TranscriptionAuthenticationError("Bad credentials")
+
+        response = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn('authentication failed', response.data['error'])
+
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    def test_transcribe_deepgram_rate_limit_returns_429(self, mock_transcribe, mock_check_s3):
+        """POST /api/meetings/<id>/transcribe/ returns 429 when Deepgram rate limit is reached."""
+        mock_check_s3.return_value = True
+        mock_transcribe.side_effect = TranscriptionRateLimitError("Rate limit exceeded")
+
+        response = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    def test_transcribe_deepgram_timeout_returns_504(self, mock_transcribe, mock_check_s3):
+        """POST /api/meetings/<id>/transcribe/ returns 504 on Deepgram timeout."""
+        mock_check_s3.return_value = True
+        mock_transcribe.side_effect = TranscriptionTimeoutError("Timed out")
+
+        response = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_504_GATEWAY_TIMEOUT)
+
+    # --------------------------------------------------------------------------
+    # 6. Empty Transcription Result Handling
+    # --------------------------------------------------------------------------
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    @patch('meetings.views.upload_s3_object_bytes')
+    def test_transcribe_empty_transcription_result(
+        self,
+        mock_upload_s3,
+        mock_transcribe,
+        mock_check_s3
+    ):
+        """POST /api/meetings/<id>/transcribe/ handles empty speech without crashing."""
+        mock_check_s3.return_value = True
+        mock_transcribe.return_value = {
+            'transcript': '',
+            'confidence': 0.0,
+            'words_count': 0,
+            'language': 'multi',
+            'model': 'nova-3',
+        }
+
+        response = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'completed')
+        self.assertEqual(response.data['transcript'], '')
+        self.assertTrue(MeetingFile.objects.filter(meeting=self.meeting1, file_type='transcript').exists())
+
+    # --------------------------------------------------------------------------
+    # 7. S3 Upload & DB Persistence Failure Handling & Cleanup
+    # --------------------------------------------------------------------------
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    @patch('meetings.views.upload_s3_object_bytes')
+    def test_transcribe_s3_upload_failure_returns_500(
+        self,
+        mock_upload_s3,
+        mock_transcribe,
+        mock_check_s3
+    ):
+        """POST /api/meetings/<id>/transcribe/ returns 500 if S3 transcript upload fails."""
+        mock_check_s3.return_value = True
+        mock_transcribe.return_value = {
+            'transcript': 'Transcript text',
+            'confidence': 0.99,
+            'words_count': 2,
+            'language': 'multi',
+        }
+        mock_upload_s3.side_effect = Exception("AWS S3 write timeout")
+
+        response = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertIn('Failed to upload transcript to S3', response.data['error'])
+        # Verify no misleading DB record created
+        self.assertFalse(MeetingFile.objects.filter(meeting=self.meeting1, file_type='transcript').exists())
+
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    @patch('meetings.views.upload_s3_object_bytes')
+    @patch('meetings.views.delete_s3_object')
+    @patch('meetings.models.MeetingFile.objects.create')
+    def test_transcribe_db_save_failure_cleans_up_s3(
+        self,
+        mock_mf_create,
+        mock_delete_s3,
+        mock_upload_s3,
+        mock_transcribe,
+        mock_check_s3
+    ):
+        """POST /api/meetings/<id>/transcribe/ cleans up S3 transcript if DB save fails."""
+        mock_check_s3.return_value = True
+        mock_transcribe.return_value = {
+            'transcript': 'Transcript text',
+            'confidence': 0.99,
+            'words_count': 2,
+            'language': 'multi',
+        }
+        mock_mf_create.side_effect = Exception("Database constraint error")
+
+        response = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        # Verify S3 cleanup was called
+        mock_delete_s3.assert_called_once()
+
+    # --------------------------------------------------------------------------
+    # 8. Duplicate Requests and Database Consistency
+    # --------------------------------------------------------------------------
+    @patch('meetings.views.check_s3_object_exists')
+    @patch('meetings.views.transcribe_audio_from_s3')
+    @patch('meetings.views.upload_s3_object_bytes')
+    @patch('meetings.views.get_s3_object_bytes')
+    def test_transcribe_duplicate_requests_and_consistency(
+        self,
+        mock_get_s3_bytes,
+        mock_upload_s3,
+        mock_transcribe,
+        mock_check_s3
+    ):
+        """Verify repeated/retry requests return completed transcript without creating duplicate records."""
+        mock_check_s3.return_value = True
+        mock_transcribe.return_value = {
+            'transcript': 'Initial transcript content.',
+            'confidence': 0.96,
+            'words_count': 3,
+            'language': 'multi',
+        }
+        mock_get_s3_bytes.return_value = b'Initial transcript content.'
+
+        # 1st request -> executes transcription & creates record
+        resp1 = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+        self.assertEqual(resp1.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp1.data['transcript'], 'Initial transcript content.')
+        self.assertEqual(MeetingFile.objects.filter(meeting=self.meeting1, file_type='transcript').count(), 1)
+
+        # 2nd duplicate request -> returns cached transcript, avoids duplicate record
+        resp2 = self.client.post(f'/api/meetings/{self.meeting1.id}/transcribe/', {}, format='json')
+        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp2.data['transcript'], 'Initial transcript content.')
+        self.assertEqual(resp2.data['transcript_file_id'], resp1.data['transcript_file_id'])
+
+        # DB must still have exactly 1 transcript file
+        self.assertEqual(MeetingFile.objects.filter(meeting=self.meeting1, file_type='transcript').count(), 1)
+        # Deepgram service was only called once, not twice
+        self.assertEqual(mock_transcribe.call_count, 1)

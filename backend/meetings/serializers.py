@@ -122,3 +122,36 @@ class ConfirmFileRequestSerializer(serializers.Serializer):
             return normalize_file_type(value)
         except ValueError as err:
             raise serializers.ValidationError(str(err))
+
+
+class TranscribeRequestSerializer(serializers.Serializer):
+    """Serializer for validating audio transcription requests."""
+    audio_file_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text="Optional ID of specific MeetingFile (file_type='audio') to transcribe."
+    )
+    language = serializers.CharField(
+        max_length=32,
+        required=False,
+        default='multi',
+        allow_blank=True,
+        help_text="Target language or 'multi' for multilingual code-switching across Gujarati, Hindi, English."
+    )
+    retranscribe = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Force re-transcription if a transcript already exists."
+    )
+
+
+class TranscribeResponseSerializer(serializers.Serializer):
+    """Serializer representing the transcription endpoint response structure."""
+    transcript = serializers.CharField(allow_blank=True)
+    transcript_file_id = serializers.IntegerField()
+    s3_key = serializers.CharField()
+    original_filename = serializers.CharField()
+    status = serializers.CharField()
+    language = serializers.CharField(required=False)
+    confidence = serializers.FloatField(required=False)
+    words_count = serializers.IntegerField(required=False)

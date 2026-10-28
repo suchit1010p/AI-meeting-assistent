@@ -353,3 +353,99 @@ def verify_s3_key_belongs_to_meeting(s3_key: str, meeting_id: Union[int, str]) -
     expected_prefix = f"meetings/{meeting_id}/"
     return s3_key.startswith(expected_prefix)
 
+
+def get_s3_object_bytes(s3_key: str, s3_client: Optional[Any] = None) -> bytes:
+    """
+    Download and return bytes of an S3 object from the private bucket.
+
+    Args:
+        s3_key: S3 object key
+        s3_client: Optional boto3 client instance
+
+    Returns:
+        bytes: Raw object content
+    """
+    if not s3_key:
+        raise ValueError("s3_key must be provided.")
+
+    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', None) or os.environ.get(
+        'AWS_STORAGE_BUCKET_NAME', 'aimeeting-assistant'
+    )
+    if not bucket_name:
+        raise ValueError("AWS_STORAGE_BUCKET_NAME is not configured.")
+
+    client = s3_client or get_s3_client()
+    try:
+        response = client.get_object(Bucket=bucket_name, Key=s3_key)
+        return response['Body'].read()
+    except (BotoCoreError, ClientError) as e:
+        logger.error(f"Failed to read S3 object '{s3_key}': {e}")
+        raise
+
+
+def upload_s3_object_bytes(
+    s3_key: str,
+    data: bytes,
+    content_type: str = 'text/plain; charset=utf-8',
+    s3_client: Optional[Any] = None
+) -> None:
+    """
+    Upload raw bytes directly to the private S3 bucket.
+
+    Args:
+        s3_key: Destination S3 key
+        data: Raw bytes to upload
+        content_type: MIME type
+        s3_client: Optional boto3 client instance
+    """
+    if not s3_key:
+        raise ValueError("s3_key must be provided.")
+
+    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', None) or os.environ.get(
+        'AWS_STORAGE_BUCKET_NAME', 'aimeeting-assistant'
+    )
+    if not bucket_name:
+        raise ValueError("AWS_STORAGE_BUCKET_NAME is not configured.")
+
+    client = s3_client or get_s3_client()
+    try:
+        client.put_object(
+            Bucket=bucket_name,
+            Key=s3_key,
+            Body=data,
+            ContentType=content_type
+        )
+    except (BotoCoreError, ClientError) as e:
+        logger.error(f"Failed to upload S3 object '{s3_key}': {e}")
+        raise
+
+
+def delete_s3_object(s3_key: str, s3_client: Optional[Any] = None) -> bool:
+    """
+    Delete an S3 object from the configured bucket.
+
+    Args:
+        s3_key: S3 object key to delete
+        s3_client: Optional boto3 client instance
+
+    Returns:
+        bool: True if deleted or already absent, False on error.
+    """
+    if not s3_key:
+        return False
+
+    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', None) or os.environ.get(
+        'AWS_STORAGE_BUCKET_NAME', 'aimeeting-assistant'
+    )
+    if not bucket_name:
+        raise ValueError("AWS_STORAGE_BUCKET_NAME is not configured.")
+
+    client = s3_client or get_s3_client()
+    try:
+        client.delete_object(Bucket=bucket_name, Key=s3_key)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to delete S3 object '{s3_key}': {e}")
+        return False
+
+

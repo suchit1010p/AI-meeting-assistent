@@ -142,3 +142,8 @@ AWS_STORAGE_BUCKET_NAME = os.environ.get('AWS_STORAGE_BUCKET_NAME', 'aimeeting-a
 AWS_S3_REGION_NAME = os.environ.get('AWS_S3_REGION_NAME', 'us-east-1')
 AWS_S3_PRESIGNED_EXPIRATION = int(os.environ.get('AWS_S3_PRESIGNED_EXPIRATION', 300))
 
+# ==============================================================================
+# Deepgram Transcription Configuration
+# ==============================================================================
+DEEPGRAM_API_KEY = os.environ.get('DEEPGRAM_API_KEY')
+
