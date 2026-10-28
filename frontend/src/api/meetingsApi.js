@@ -153,7 +153,14 @@ export const meetingsApi = {
     }
 
     if (!response.ok) {
-      throw new Error(`AWS S3 rejected the direct upload (HTTP ${response.status}).`)
+      let detail = ''
+      try {
+        detail = await response.text()
+      } catch (e) {
+        // ignore
+      }
+      console.error('[S3 Upload Error]', response.status, detail)
+      throw new Error(`AWS S3 rejected the direct upload (HTTP ${response.status}). ${detail ? 'Details: ' + detail : ''}`.trim())
     }
 
     return true
