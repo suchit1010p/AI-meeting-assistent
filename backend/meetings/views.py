@@ -16,6 +16,7 @@ from .serializers import (
 )
 from .s3_utils import (
     generate_presigned_upload_url,
+    generate_presigned_download_url,
     check_s3_object_exists,
     verify_s3_key_belongs_to_meeting,
     normalize_file_type,
@@ -75,6 +76,42 @@ class MeetingDetailView(APIView):
 
         serializer = MeetingSerializer(meeting)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request, pk):
+        try:
+            meeting = Meeting.objects.get(pk=pk)
+        except Meeting.DoesNotExist:
+            return Response(
+                {"error": f"Meeting with id {pk} does not exist."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        serializer = MeetingCreateSerializer(meeting, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        updated_meeting = serializer.save()
+        output_serializer = MeetingSerializer(updated_meeting)
+        return Response(output_serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request, pk):
+        try:
+            meeting = Meeting.objects.get(pk=pk)
+        except Meeting.DoesNotExist:
+            return Response(
+                {"error": f"Meeting with id {pk} does not exist."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Delete S3 objects associated with meeting
+        for file_obj in meeting.files.all():
+            try:
+                delete_s3_object(file_obj.s3_key)
+            except Exception as e:
+                logger.warning(f"Could not delete S3 object {file_obj.s3_key}: {e}")
+
+        meeting.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class MeetingFileUploadUrlView(APIView):
@@ -234,6 +271,88 @@ class MeetingFileListView(APIView):
 
         serializer = MeetingFileSerializer(files, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MeetingFileDownloadUrlView(APIView):
+    """
+    GET /api/meetings/<pk>/files/<file_id>/download-url/
+    Verify meeting/file ownership, check S3 object existence, and return a short-lived presigned GET URL.
+    """
+
+    def get(self, request, pk, file_id):
+        try:
+            meeting = Meeting.objects.get(pk=pk)
+        except Meeting.DoesNotExist:
+            return Response(
+                {"error": f"Meeting with id {pk} does not exist."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            meeting_file = MeetingFile.objects.get(pk=file_id)
+        except MeetingFile.DoesNotExist:
+            return Response(
+                {"error": f"File with id {file_id} does not exist."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Confirm ownership
+        if meeting_file.meeting_id != meeting.id:
+            return Response(
+                {"error": f"File with id {file_id} does not belong to meeting {meeting.id}."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Verify S3 object exists
+        if not check_s3_object_exists(meeting_file.s3_key):
+            return Response(
+                {"error": f"Object with key '{meeting_file.s3_key}' does not exist in S3 storage."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        download_url = generate_presigned_download_url(
+            s3_key=meeting_file.s3_key,
+            expiration=300
+        )
+
+        return Response({
+            'download_url': download_url,
+            's3_key': meeting_file.s3_key,
+            'file_type': meeting_file.file_type,
+            'original_filename': meeting_file.original_filename,
+            'expires_in': 300,
+        }, status=status.HTTP_200_OK)
+
+
+class MeetingFileDetailView(APIView):
+    """
+    DELETE /api/meetings/<pk>/files/<file_id>/
+    Delete a specific file from SQLite and S3.
+    """
+
+    def delete(self, request, pk, file_id):
+        try:
+            meeting = Meeting.objects.get(pk=pk)
+        except Meeting.DoesNotExist:
+            return Response(
+                {"error": f"Meeting with id {pk} does not exist."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            meeting_file = MeetingFile.objects.get(pk=file_id, meeting=meeting)
+        except MeetingFile.DoesNotExist:
+            return Response(
+                {"error": f"File with id {file_id} does not exist for meeting {pk}."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Remove from S3
+        delete_s3_object(meeting_file.s3_key)
+
+        # Remove from SQLite
+        meeting_file.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class MeetingTranscribeView(APIView):

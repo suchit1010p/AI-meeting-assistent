@@ -189,19 +189,29 @@ export default function MeetingAudioCard({
     setPendingAudio(null)
   }
 
-  // Save pending recording to session
-  const handleSavePending = () => {
-    if (!pendingAudio) return
-    const newRecording = {
-      id: `rec-${Date.now()}`,
-      name: `Recording ${recordings.length + 1}`,
-      duration: pendingAudio.duration || '00:00',
-      timestamp: getFormattedTimestamp(),
-      audioUrl: pendingAudio.url,
-      blob: pendingAudio.blob,
+  const [isUploading, setIsUploading] = useState(false)
+  const [uploadError, setUploadError] = useState(null)
+
+  // Save pending recording to session & upload to S3
+  const handleSavePending = async () => {
+    if (!pendingAudio || isUploading) return
+    setIsUploading(true)
+    setUploadError(null)
+
+    try {
+      await onSaveRecording({
+        blob: pendingAudio.blob,
+        duration: pendingAudio.duration || '00:00',
+        durationSeconds: pendingAudio.durationSeconds || 0,
+        localUrl: pendingAudio.url,
+      })
+      setPendingAudio(null) // saved to session
+    } catch (err) {
+      console.error('Failed to upload/save recording:', err)
+      setUploadError(err.message || 'Failed to upload audio to S3. Please try again.')
+    } finally {
+      setIsUploading(false)
     }
-    onSaveRecording(newRecording)
-    setPendingAudio(null) // saved to session
   }
 
   // Handle inline playback of a saved recording
@@ -317,7 +327,12 @@ export default function MeetingAudioCard({
               <button
                 type="button"
                 onClick={handleDiscardPending}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-gray-600 hover:text-red-600 bg-white border border-gray-200 hover:border-red-200 rounded-md transition-colors"
+                disabled={isUploading}
+                className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-md transition-colors ${
+                  isUploading
+                    ? 'text-gray-300 bg-gray-50 border border-gray-100 cursor-not-allowed'
+                    : 'text-gray-600 hover:text-red-600 bg-white border border-gray-200 hover:border-red-200'
+                }`}
                 title="Discard recording"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -326,13 +341,45 @@ export default function MeetingAudioCard({
               <button
                 type="button"
                 onClick={handleSavePending}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-gray-900 hover:bg-black rounded-md transition-colors shadow-2xs"
+                disabled={isUploading}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white rounded-md transition-colors shadow-2xs ${
+                  isUploading
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : 'bg-gray-900 hover:bg-black active:bg-gray-800'
+                }`}
               >
-                <Save className="w-3.5 h-3.5" />
-                <span>Save Recording</span>
+                {isUploading ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Uploading to S3...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Save Recording</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
+
+          {/* Upload Error Banner with Retry */}
+          {uploadError && (
+            <div className="mt-2.5 p-2.5 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between gap-2 text-xs text-red-700">
+              <div className="flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                <span>{uploadError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleSavePending}
+                disabled={isUploading}
+                className="font-medium underline hover:text-red-900 shrink-0"
+              >
+                Retry
+              </button>
+            </div>
+          )}
         </div>
       )}
 

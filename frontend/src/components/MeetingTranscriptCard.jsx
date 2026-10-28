@@ -9,6 +9,8 @@ import {
   Copy,
   Check,
   AlignLeft,
+  RefreshCw,
+  AlertCircle,
 } from 'lucide-react'
 
 /**
@@ -40,31 +42,26 @@ David: We release Object URLs when recordings are discarded or replaced to avoid
     )
   }
 
-  const handleSubmit = (e) => {
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState(null)
+
+  const handleSubmit = async (e) => {
     e?.preventDefault()
-    if (!canSubmit) return
+    if (!canSubmit || isSubmitting) return
 
     const trimmed = inputText.trim()
-    const now = new Date()
-    const timeFormatted =
-      now.toLocaleTimeString('en-US', {
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: true,
-      }) + ' • Today'
+    setIsSubmitting(true)
+    setSubmitError(null)
 
-    const newTranscript = {
-      id: `trans-${Date.now()}`,
-      name: `Transcript ${transcripts.length + 1}`,
-      text: trimmed,
-      preview: trimmed.slice(0, 140) + (trimmed.length > 140 ? '...' : ''),
-      wordCount: trimmed.split(/\s+/).length,
-      charCount: trimmed.length,
-      timestamp: timeFormatted,
+    try {
+      await onSubmitTranscript(trimmed)
+      setInputText('')
+    } catch (err) {
+      console.error('Failed to submit transcript:', err)
+      setSubmitError(err.message || 'Failed to upload transcript to S3. Please try again.')
+    } finally {
+      setIsSubmitting(false)
     }
-
-    onSubmitTranscript(newTranscript)
-    setInputText('')
   }
 
   const handleCopy = async (text) => {
@@ -146,17 +143,43 @@ David: We release Object URLs when recordings are discarded or replaced to avoid
 
           <button
             type="submit"
-            disabled={!canSubmit}
+            disabled={!canSubmit || isSubmitting}
             className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium transition-all shadow-2xs ${
-              canSubmit
+              canSubmit && !isSubmitting
                 ? 'bg-gray-900 text-white hover:bg-black active:bg-gray-800 cursor-pointer'
                 : 'bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed'
             }`}
           >
-            <Send className="w-3.5 h-3.5" />
-            <span>Submit Transcript</span>
+            {isSubmitting ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Uploading to S3...</span>
+              </>
+            ) : (
+              <>
+                <Send className="w-3.5 h-3.5" />
+                <span>Submit Transcript</span>
+              </>
+            )}
           </button>
         </div>
+
+        {/* Submit Error Banner */}
+        {submitError && (
+          <div className="mt-2.5 p-2.5 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between gap-2 text-xs text-red-700">
+            <div className="flex items-center gap-1.5">
+              <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+              <span>{submitError}</span>
+            </div>
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="font-medium underline hover:text-red-900 shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </form>
 
       {/* Previously Submitted Transcripts List Subsection (same as audio list) */}

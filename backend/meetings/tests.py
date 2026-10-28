@@ -387,6 +387,91 @@ class MeetingAPITestCase(APITestCase):
         response = self.client.get('/api/meetings/999999/files/')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_update_meeting_title(self):
+        """PATCH /api/meetings/<id>/ should update meeting title."""
+        response = self.client.patch(
+            f'/api/meetings/{self.meeting1.id}/',
+            {'title': 'Renamed Architecture Review'},
+            format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['title'], 'Renamed Architecture Review')
+        self.meeting1.refresh_from_db()
+        self.assertEqual(self.meeting1.title, 'Renamed Architecture Review')
+
+    @patch('meetings.views.delete_s3_object')
+    def test_delete_meeting(self, mock_delete_s3):
+        """DELETE /api/meetings/<id>/ should delete meeting and its files."""
+        MeetingFile.objects.create(
+            meeting=self.meeting1,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting1.id}/audio/to_del.webm",
+            original_filename="to_del.webm"
+        )
+        response = self.client.delete(f'/api/meetings/{self.meeting1.id}/')
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Meeting.objects.filter(id=self.meeting1.id).exists())
+        self.assertFalse(MeetingFile.objects.filter(meeting_id=self.meeting1.id).exists())
+        mock_delete_s3.assert_called_once()
+
+    @patch('meetings.views.check_s3_object_exists')
+    def test_get_file_download_url_success(self, mock_check_s3):
+        """GET /api/meetings/<id>/files/<file_id>/download-url/ returns presigned download URL."""
+        mock_check_s3.return_value = True
+        file_obj = MeetingFile.objects.create(
+            meeting=self.meeting1,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting1.id}/audio/play.webm",
+            original_filename="play.webm"
+        )
+        response = self.client.get(f'/api/meetings/{self.meeting1.id}/files/{file_obj.id}/download-url/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('download_url', response.data)
+        self.assertIn('s3_key', response.data)
+        self.assertEqual(response.data['file_type'], 'audio')
+        self.assertEqual(response.data['original_filename'], 'play.webm')
+        self.assertIn('aimeeting-assistant', response.data['download_url'])
+
+    @patch('meetings.views.check_s3_object_exists')
+    def test_get_file_download_url_missing_s3_object(self, mock_check_s3):
+        """GET /api/meetings/<id>/files/<file_id>/download-url/ returns 404 if S3 object is missing."""
+        mock_check_s3.return_value = False
+        file_obj = MeetingFile.objects.create(
+            meeting=self.meeting1,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting1.id}/audio/missing.webm",
+            original_filename="missing.webm"
+        )
+        response = self.client.get(f'/api/meetings/{self.meeting1.id}/files/{file_obj.id}/download-url/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertIn('does not exist in S3', response.data['error'])
+
+    def test_get_file_download_url_foreign_meeting_file(self):
+        """GET /api/meetings/<id>/files/<file_id>/download-url/ returns 400 if file belongs to another meeting."""
+        file_m2 = MeetingFile.objects.create(
+            meeting=self.meeting2,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting2.id}/audio/other.webm",
+            original_filename="other.webm"
+        )
+        response = self.client.get(f'/api/meetings/{self.meeting1.id}/files/{file_m2.id}/download-url/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('does not belong to meeting', response.data['error'])
+
+    @patch('meetings.views.delete_s3_object')
+    def test_delete_file_success(self, mock_delete_s3):
+        """DELETE /api/meetings/<id>/files/<file_id>/ deletes file from DB and S3."""
+        file_obj = MeetingFile.objects.create(
+            meeting=self.meeting1,
+            file_type='audio',
+            s3_key=f"meetings/{self.meeting1.id}/audio/del_file.webm",
+            original_filename="del_file.webm"
+        )
+        response = self.client.delete(f'/api/meetings/{self.meeting1.id}/files/{file_obj.id}/')
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(MeetingFile.objects.filter(id=file_obj.id).exists())
+        mock_delete_s3.assert_called_once_with(file_obj.s3_key)
+
 
 # ==============================================================================
 # Step 3: Audio Transcription Tests

@@ -1,12 +1,18 @@
 import re
 from rest_framework import serializers
 from .models import Meeting, MeetingFile
-from .s3_utils import validate_file_type, normalize_file_type, SUPPORTED_FILE_TYPES
+from .s3_utils import (
+    validate_file_type,
+    normalize_file_type,
+    SUPPORTED_FILE_TYPES,
+    generate_presigned_download_url,
+)
 
 
 class MeetingFileSerializer(serializers.ModelSerializer):
     """Serializer for displaying MeetingFile metadata."""
     meeting_id = serializers.IntegerField(source='meeting.id', read_only=True)
+    download_url = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = MeetingFile
@@ -16,9 +22,18 @@ class MeetingFileSerializer(serializers.ModelSerializer):
             'file_type',
             's3_key',
             'original_filename',
+            'download_url',
             'created_at',
         ]
-        read_only_fields = ['id', 'meeting_id', 'created_at']
+        read_only_fields = ['id', 'meeting_id', 'download_url', 'created_at']
+
+    def get_download_url(self, obj):
+        if not obj or not obj.s3_key:
+            return None
+        try:
+            return generate_presigned_download_url(obj.s3_key, expiration=3600)
+        except Exception:
+            return None
 
 
 class MeetingSerializer(serializers.ModelSerializer):

@@ -37,21 +37,20 @@ export default function MeetingFolder({
     activeSelection?.meetingId === meeting.id &&
     activeSelection?.childType === 'summary'
 
-  // Format date nicely (e.g., Oct 27, 2026 or fallback)
+  // Format date nicely (e.g., Oct 27 or fallback)
   const formatDate = (dateStr) => {
     if (!dateStr) return ''
     try {
-      const parts = dateStr.split('-')
-      if (parts.length === 3) {
-        const date = new Date(parts[0], parts[1] - 1, parts[2])
-        return date.toLocaleDateString('en-US', {
+      const parsed = new Date(dateStr)
+      if (!isNaN(parsed.getTime())) {
+        return parsed.toLocaleDateString('en-US', {
           month: 'short',
           day: 'numeric',
         })
       }
-      return dateStr
+      return String(dateStr)
     } catch {
-      return dateStr
+      return String(dateStr)
     }
   }
 
@@ -106,7 +105,7 @@ export default function MeetingFolder({
               {meeting.title}
             </span>
             <span className="text-[10px] text-gray-400 leading-tight">
-              {formatDate(meeting.date)}
+              {formatDate(meeting.created_at || meeting.date)}
             </span>
           </div>
         </div>

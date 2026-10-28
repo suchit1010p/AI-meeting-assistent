@@ -22,7 +22,7 @@ export default function MeetingHistory({
     if (!searchQuery.trim()) return true
     const q = searchQuery.toLowerCase().trim()
     const matchesTitle = meeting.title.toLowerCase().includes(q)
-    const matchesDate = meeting.date?.toLowerCase().includes(q)
+    const matchesDate = (meeting.date || meeting.created_at || '').toLowerCase().includes(q)
     const matchesTranscript = meeting.transcript?.toLowerCase().includes(q)
     return matchesTitle || matchesDate || matchesTranscript
   })

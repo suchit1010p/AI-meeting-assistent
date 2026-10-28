@@ -5,6 +5,8 @@ from .views import (
     MeetingFileUploadUrlView,
     MeetingFileConfirmView,
     MeetingFileListView,
+    MeetingFileDownloadUrlView,
+    MeetingFileDetailView,
     MeetingTranscribeView,
 )
 
@@ -15,6 +17,8 @@ urlpatterns = [
     path('<int:pk>/', MeetingDetailView.as_view(), name='meeting-detail'),
     path('<int:pk>/files/upload-url/', MeetingFileUploadUrlView.as_view(), name='meeting-file-upload-url'),
     path('<int:pk>/files/confirm/', MeetingFileConfirmView.as_view(), name='meeting-file-confirm'),
+    path('<int:pk>/files/<int:file_id>/download-url/', MeetingFileDownloadUrlView.as_view(), name='meeting-file-download-url'),
+    path('<int:pk>/files/<int:file_id>/', MeetingFileDetailView.as_view(), name='meeting-file-detail'),
     path('<int:pk>/files/', MeetingFileListView.as_view(), name='meeting-file-list'),
     path('<int:pk>/transcribe/', MeetingTranscribeView.as_view(), name='meeting-transcribe'),
 ]
