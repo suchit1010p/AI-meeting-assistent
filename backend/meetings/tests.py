@@ -97,7 +97,7 @@ class S3UtilsTestCase(TestCase):
 
         # Check URL structure
         url = result['upload_url']
-        self.assertTrue(url.startswith('https://aimeeting-assistant.s3.amazonaws.com/'))
+        self.assertIn('aimeeting-assistant', url)
         self.assertIn('meetings/99/audio/', url)
         self.assertIn('X-Amz-Signature=', url)
 
@@ -119,7 +119,7 @@ class S3UtilsTestCase(TestCase):
         s3_key = 'meetings/12/audio/sample.webm'
         url = generate_presigned_download_url(s3_key=s3_key, expiration=600)
 
-        self.assertTrue(url.startswith('https://aimeeting-assistant.s3.amazonaws.com/'))
+        self.assertIn('aimeeting-assistant', url)
         self.assertIn(s3_key, url)
         self.assertIn('X-Amz-Signature=', url)
 

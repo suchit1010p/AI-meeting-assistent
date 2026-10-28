@@ -162,6 +162,13 @@ def get_s3_client():
         'region_name': region_name,
     }
 
+    endpoint_url = getattr(settings, 'AWS_S3_ENDPOINT_URL', None) or os.environ.get('AWS_S3_ENDPOINT_URL')
+    if not endpoint_url and region_name:
+        endpoint_url = f"https://s3.{region_name}.amazonaws.com"
+
+    if endpoint_url:
+        client_kwargs['endpoint_url'] = endpoint_url
+
     if aws_access_key and aws_secret_key:
         client_kwargs['aws_access_key_id'] = aws_access_key
         client_kwargs['aws_secret_access_key'] = aws_secret_key
