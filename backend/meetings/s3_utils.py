@@ -230,13 +230,13 @@ def generate_presigned_upload_url(
     client = s3_client or get_s3_client()
 
     try:
+        params = {
+            'Bucket': bucket_name,
+            'Key': s3_key,
+        }
         presigned_url = client.generate_presigned_url(
             ClientMethod='put_object',
-            Params={
-                'Bucket': bucket_name,
-                'Key': s3_key,
-                'ContentType': content_type,
-            },
+            Params=params,
             ExpiresIn=exp_seconds,
             HttpMethod='PUT'
         )
