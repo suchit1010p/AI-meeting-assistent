@@ -3,7 +3,7 @@ import initialMeetings from './data/mockMeetings'
 import Sidebar from './components/Sidebar'
 import WorkspaceHeader from './components/WorkspaceHeader'
 import MeetingAudioCard from './components/MeetingAudioCard'
-import MeetingTranscriptInput from './components/MeetingTranscriptInput'
+import MeetingTranscriptCard from './components/MeetingTranscriptCard'
 import GenerateNotesAction from './components/GenerateNotesAction'
 import MeetingNotesCard from './components/MeetingNotesCard'
 import ConfirmationModal from './components/ConfirmationModal'
@@ -12,7 +12,7 @@ import ConfirmationModal from './components/ConfirmationModal'
  * MeetNote AI - Primary Application Container
  * Main workspace content order:
  * 1. Audio Recording Card (MeetingAudioCard)
- * 2. Transcript Text Input (MeetingTranscriptInput)
+ * 2. Transcript Card (MeetingTranscriptCard)
  * 3. Generate Notes Action (GenerateNotesAction)
  * 4. Meeting Notes Card (MeetingNotesCard)
  */
@@ -26,7 +26,7 @@ export default function App() {
   // Draft session state for "New Meeting"
   const [draftSession, setDraftSession] = useState({
     recordings: [],
-    transcript: '',
+    transcripts: [],
     notes: [],
   })
 
@@ -78,13 +78,29 @@ export default function App() {
     ? meetings.find((m) => m.id === activeSelection.meetingId)
     : null
 
-  // Current session data: either the selected meeting or the draft session
+  // Current session data
   const currentRecordings = isHistorySession
     ? activeMeeting?.recordings || []
     : draftSession.recordings
-  const currentTranscript = isHistorySession
-    ? activeMeeting?.transcript || ''
-    : draftSession.transcript
+
+  // Resolve current session transcripts (supporting array or legacy string)
+  const currentTranscripts = isHistorySession
+    ? activeMeeting?.transcripts ||
+      (activeMeeting?.transcript
+        ? [
+            {
+              id: 'trans-default',
+              name: 'Transcript 1',
+              text: activeMeeting.transcript,
+              preview: activeMeeting.transcript.slice(0, 140) + '...',
+              wordCount: activeMeeting.transcript.split(/\s+/).length,
+              charCount: activeMeeting.transcript.length,
+              timestamp: activeMeeting.date || 'Oct 27, 2026',
+            },
+          ]
+        : [])
+    : draftSession.transcripts
+
   const currentNotes = isHistorySession
     ? activeMeeting?.notes || []
     : draftSession.notes
@@ -188,17 +204,45 @@ export default function App() {
     }
   }
 
-  const handleTranscriptChange = (newText) => {
+  const handleSubmitTranscript = (newTranscript) => {
     if (isHistorySession && activeMeeting) {
       setMeetings((prev) =>
         prev.map((m) =>
-          m.id === activeMeeting.id ? { ...m, transcript: newText } : m
+          m.id === activeMeeting.id
+            ? {
+                ...m,
+                transcripts: [newTranscript, ...(m.transcripts || [])],
+                transcript: newTranscript.text,
+              }
+            : m
         )
       )
     } else {
       setDraftSession((prev) => ({
         ...prev,
-        transcript: newText,
+        transcripts: [newTranscript, ...prev.transcripts],
+      }))
+    }
+  }
+
+  const handleDeleteTranscript = (transcriptId) => {
+    if (isHistorySession && activeMeeting) {
+      setMeetings((prev) =>
+        prev.map((m) =>
+          m.id === activeMeeting.id
+            ? {
+                ...m,
+                transcripts: (m.transcripts || []).filter(
+                  (t) => t.id !== transcriptId
+                ),
+              }
+            : m
+        )
+      )
+    } else {
+      setDraftSession((prev) => ({
+        ...prev,
+        transcripts: prev.transcripts.filter((t) => t.id !== transcriptId),
       }))
     }
   }
@@ -227,7 +271,7 @@ export default function App() {
   // Generate Notes Action
   // -------------------------------------------------------------
   const canGenerate =
-    currentTranscript.trim().length > 0 || currentRecordings.length > 0
+    currentTranscripts.length > 0 || currentRecordings.length > 0
 
   const handleGenerateNotes = () => {
     if (!canGenerate || isGenerating) return
@@ -235,17 +279,21 @@ export default function App() {
     setIsGenerating(true)
     setDemoNotice(false)
 
-    // Simulate short frontend processing state
     setTimeout(() => {
       setIsGenerating(false)
       setDemoNotice(true)
 
-      // Add a clean demo note to the session so the notes card updates
-      const timestampStr = new Date().toLocaleTimeString('en-US', {
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: true,
-      }) + ' • Today'
+      const timestampStr =
+        new Date().toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+        }) + ' • Today'
+
+      const totalWords = currentTranscripts.reduce(
+        (sum, t) => sum + (t.wordCount || 0),
+        0
+      )
 
       const generatedNote = {
         id: `note-${Date.now()}`,
@@ -254,20 +302,17 @@ export default function App() {
           minute: '2-digit',
           hour12: true,
         })}`,
-        preview: currentTranscript.trim()
-          ? `Notes captured from transcript (${currentTranscript.trim().split(/\s+/).length} words)...`
-          : `Notes captured from ${currentRecordings.length} audio recording(s)...`,
+        preview:
+          currentTranscripts.length > 0
+            ? `Generated from ${currentTranscripts.length} transcript(s) (${totalWords} words)...`
+            : `Generated from ${currentRecordings.length} audio recording(s)...`,
         timestamp: timestampStr,
         content: `### Meeting Notes (Frontend Demo)
 This note illustrates the frontend layout for generated meeting documentation. In a complete production deployment, this content is returned by the AI processing service using Whisper speech transcription and LLM summarization.
 
 ### Session Inputs Processed
-- Transcript: ${
-          currentTranscript.trim()
-            ? `${currentTranscript.length} characters`
-            : 'None provided'
-        }
-- Audio recordings: ${currentRecordings.length} recording(s)
+- Transcripts: ${currentTranscripts.length} item(s) (${totalWords} words)
+- Audio recordings: ${currentRecordings.length} file(s)
 
 ### Action Items
 - [ ] Connect backend transcription pipeline.
@@ -403,11 +448,12 @@ This note illustrates the frontend layout for generated meeting documentation. I
               />
             </div>
 
-            {/* 2. Transcript Text Input */}
+            {/* 2. Meeting Transcript Card (Redesigned like Meeting Audio Card) */}
             <div id="section-transcript">
-              <MeetingTranscriptInput
-                transcript={currentTranscript}
-                onChange={handleTranscriptChange}
+              <MeetingTranscriptCard
+                transcripts={currentTranscripts}
+                onSubmitTranscript={handleSubmitTranscript}
+                onDeleteTranscript={handleDeleteTranscript}
               />
             </div>
 

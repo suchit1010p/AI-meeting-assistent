@@ -1,6 +1,6 @@
 /**
  * Mock meeting history data for MeetNote AI demonstration.
- * Each meeting session maintains its own recordings, transcript, and notes.
+ * Each meeting session maintains its own recordings, transcripts, and notes.
  */
 
 const mockMeetings = [
@@ -19,6 +19,21 @@ const mockMeetings = [
     ],
     audioDuration: "14:20",
     audioUrl: null,
+    transcripts: [
+      {
+        id: "trans-1-1",
+        name: "Transcript 1",
+        text: `Sarah: Let's review the Q4 roadmap priorities. The main focus is completing the audio recording pipeline and latency reduction for real-time transcription.
+David: On the frontend, we have implemented the pure white minimal interface. The MediaRecorder API is capturing local blobs without issues.
+Sarah: Excellent. How are we handling long recordings? Is there memory pressure?
+David: We release Object URLs when recordings are discarded or replaced to avoid memory leaks. We also enforce chunking before backend uploads.
+Alex: From the backend side, once integration begins, we will process the stream through Whisper and generate structured action items.
+Sarah: Great. Let's aim to have the API contracts finalized by Wednesday so we can start integration testing.`,
+        wordCount: 104,
+        charCount: 685,
+        timestamp: "Oct 27, 2026 • 10:35 AM"
+      }
+    ],
     transcript: `Sarah: Let's review the Q4 roadmap priorities. The main focus is completing the audio recording pipeline and latency reduction for real-time transcription.
 David: On the frontend, we have implemented the pure white minimal interface. The MediaRecorder API is capturing local blobs without issues.
 Sarah: Excellent. How are we handling long recordings? Is there memory pressure?
@@ -62,6 +77,20 @@ The team met to align on Q4 engineering objectives, focusing on the audio record
     ],
     audioDuration: "08:45",
     audioUrl: null,
+    transcripts: [
+      {
+        id: "trans-2-1",
+        name: "Transcript 1",
+        text: `Marcus: Morning everyone. Quick standup today. Elena, any blockers on the design system?
+Elena: None. All components have been aligned with the minimal pure white theme. Borders are set to #E5E7EB with crisp typography and subtle hover states.
+Marcus: Sounds solid. Are the folder tree icons intuitive for the collapsible sidebar?
+Elena: Yes, using Lucide icons: Folder, Volume2 for audio, FileText for transcripts, and Sparkles for AI summaries.
+Marcus: Perfect. Keep everything restrained—no gradients or heavy drop shadows.`,
+        wordCount: 77,
+        charCount: 489,
+        timestamp: "Oct 26, 2026 • 09:20 AM"
+      }
+    ],
     transcript: `Marcus: Morning everyone. Quick standup today. Elena, any blockers on the design system?
 Elena: None. All components have been aligned with the minimal pure white theme. Borders are set to #E5E7EB with crisp typography and subtle hover states.
 Marcus: Sounds solid. Are the folder tree icons intuitive for the collapsible sidebar?
@@ -102,6 +131,20 @@ Weekly standup confirming design system guidelines and iconography for the meeti
     ],
     audioDuration: "22:15",
     audioUrl: null,
+    transcripts: [
+      {
+        id: "trans-3-1",
+        name: "Transcript 1",
+        text: `Rachel: Acme Corp tested the meeting notes prototype last Friday. Overall sentiment was very positive, especially around simplicity.
+Jason: Did they mention anything about the transcript editor?
+Rachel: They loved having the text paste option right alongside the audio recorder rather than hidden behind tabs or wizard steps.
+Jason: That validates our single-workspace design decision. What about export formats?
+Rachel: They requested Markdown and PDF exports for next quarter once the backend is ready.`,
+        wordCount: 78,
+        charCount: 512,
+        timestamp: "Oct 24, 2026 • 02:30 PM"
+      }
+    ],
     transcript: `Rachel: Acme Corp tested the meeting notes prototype last Friday. Overall sentiment was very positive, especially around simplicity.
 Jason: Did they mention anything about the transcript editor?
 Rachel: They loved having the text paste option right alongside the audio recorder rather than hidden behind tabs or wizard steps.
@@ -142,6 +185,19 @@ Review of customer feedback from Acme Corp's beta testing of the meeting note ca
     ],
     audioDuration: "18:02",
     audioUrl: null,
+    transcripts: [
+      {
+        id: "trans-4-1",
+        name: "Transcript 1",
+        text: `Tom: Let's discuss how we will separate the client recording buffer from the streaming backend.
+Maya: We should keep the frontend recording logic completely decoupled from meeting history state. React hooks should handle the MediaRecorder lifecycle.
+Tom: Agreed. When the user stops recording, we create a local Blob and pass it to an AudioPreview component.
+Maya: And if the user cancels or discards, the MediaStream tracks are terminated immediately.`,
+        wordCount: 70,
+        charCount: 462,
+        timestamp: "Oct 22, 2026 • 04:45 PM"
+      }
+    ],
     transcript: `Tom: Let's discuss how we will separate the client recording buffer from the streaming backend.
 Maya: We should keep the frontend recording logic completely decoupled from meeting history state. React hooks should handle the MediaRecorder lifecycle.
 Tom: Agreed. When the user stops recording, we create a local Blob and pass it to an AudioPreview component.
