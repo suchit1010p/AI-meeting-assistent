@@ -2,38 +2,47 @@ import { useState, useEffect, useRef } from 'react'
 import initialMeetings from './data/mockMeetings'
 import Sidebar from './components/Sidebar'
 import WorkspaceHeader from './components/WorkspaceHeader'
-import MeetingInput from './components/MeetingInput'
-import HistoryViewer from './components/HistoryViewer'
-import ProcessingState from './components/ProcessingState'
+import MeetingAudioCard from './components/MeetingAudioCard'
+import MeetingTranscriptInput from './components/MeetingTranscriptInput'
+import GenerateNotesAction from './components/GenerateNotesAction'
+import MeetingNotesCard from './components/MeetingNotesCard'
 import ConfirmationModal from './components/ConfirmationModal'
 
 /**
  * MeetNote AI - Primary Application Container
- * Manages meeting history, active folder navigation, audio recording state,
- * and workspace presentation.
+ * Main workspace content order:
+ * 1. Audio Recording Card (MeetingAudioCard)
+ * 2. Transcript Text Input (MeetingTranscriptInput)
+ * 3. Generate Notes Action (GenerateNotesAction)
+ * 4. Meeting Notes Card (MeetingNotesCard)
  */
 export default function App() {
-  // Meetings data state (initialized with realistic mock data)
+  // Saved meetings state
   const [meetings, setMeetings] = useState(initialMeetings)
 
-  // Active selection: null (New Meeting workspace) OR { meetingId: string, childType: 'overview'|'audio'|'transcript'|'summary' }
+  // Active selection: null (New Meeting) OR { meetingId: string, childType?: 'overview'|'audio'|'transcript'|'summary' }
   const [activeSelection, setActiveSelection] = useState(null)
 
-  // Expanded folders in sidebar (default: first meeting expanded)
+  // Draft session state for "New Meeting"
+  const [draftSession, setDraftSession] = useState({
+    recordings: [],
+    transcript: '',
+    notes: [],
+  })
+
+  // Global recording state indicator
+  const [isRecordingAudio, setIsRecordingAudio] = useState(false)
+
+  // Generate notes processing states
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [demoNotice, setDemoNotice] = useState(false)
+
+  // Sidebar state
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false)
   const [expandedFolderIds, setExpandedFolderIds] = useState(
     () => new Set(['meeting-1'])
   )
-
-  // Sidebar responsiveness
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
-  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false)
-
-  // New Meeting Input State
-  const [transcript, setTranscript] = useState('')
-  const [audioData, setAudioData] = useState(null) // { blob, url, duration, durationSeconds }
-  const [isRecordingAudio, setIsRecordingAudio] = useState(false)
-  const [isProcessing, setIsProcessing] = useState(false)
-  const [hasProcessedDemo, setHasProcessedDemo] = useState(false)
 
   // Dialog / Modal states
   const [deleteModalState, setDeleteModalState] = useState({
@@ -51,28 +60,46 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      // Clean up all generated object URLs on unmount
       activeObjectUrlsRef.current.forEach((url) => {
         try {
           URL.revokeObjectURL(url)
         } catch {
-          // Ignore revocation error
+          // ignore
         }
       })
     }
   }, [])
 
   // -------------------------------------------------------------
+  // Active Session Resolution
+  // -------------------------------------------------------------
+  const isHistorySession = activeSelection !== null
+  const activeMeeting = isHistorySession
+    ? meetings.find((m) => m.id === activeSelection.meetingId)
+    : null
+
+  // Current session data: either the selected meeting or the draft session
+  const currentRecordings = isHistorySession
+    ? activeMeeting?.recordings || []
+    : draftSession.recordings
+  const currentTranscript = isHistorySession
+    ? activeMeeting?.transcript || ''
+    : draftSession.transcript
+  const currentNotes = isHistorySession
+    ? activeMeeting?.notes || []
+    : draftSession.notes
+
+  // -------------------------------------------------------------
   // Navigation & Tree Interactions
   // -------------------------------------------------------------
-
   const handleNewMeeting = () => {
     setActiveSelection(null)
-    setHasProcessedDemo(false)
+    setDemoNotice(false)
   }
 
   const handleSelectMeeting = (meetingId) => {
     setActiveSelection({ meetingId, childType: 'overview' })
+    setDemoNotice(false)
     setExpandedFolderIds((prev) => {
       const next = new Set(prev)
       next.add(meetingId)
@@ -82,6 +109,21 @@ export default function App() {
 
   const handleSelectChildItem = (meetingId, childType) => {
     setActiveSelection({ meetingId, childType })
+    setDemoNotice(false)
+
+    // Smooth-scroll to target section
+    setTimeout(() => {
+      const targetId =
+        childType === 'audio'
+          ? 'section-audio'
+          : childType === 'transcript'
+          ? 'section-transcript'
+          : 'section-notes'
+      const el = document.getElementById(targetId)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }
+    }, 50)
   }
 
   const handleToggleExpand = (meetingId) => {
@@ -97,83 +139,164 @@ export default function App() {
   }
 
   // -------------------------------------------------------------
-  // Audio Lifecycle & Cleanup
+  // Session State Modifiers
   // -------------------------------------------------------------
+  const handleSaveRecording = (newRecording) => {
+    if (newRecording.audioUrl) {
+      activeObjectUrlsRef.current.push(newRecording.audioUrl)
+    }
 
-  const handleAudioRecorded = (recordedData) => {
-    // If a previous recording URL existed, revoke it
-    if (audioData?.url) {
-      try {
-        URL.revokeObjectURL(audioData.url)
-      } catch {
-        // Ignore revocation error
-      }
+    if (isHistorySession && activeMeeting) {
+      setMeetings((prev) =>
+        prev.map((m) =>
+          m.id === activeMeeting.id
+            ? {
+                ...m,
+                recordings: [newRecording, ...(m.recordings || [])],
+                audioDuration: newRecording.duration,
+              }
+            : m
+        )
+      )
+    } else {
+      setDraftSession((prev) => ({
+        ...prev,
+        recordings: [newRecording, ...prev.recordings],
+      }))
     }
-    if (recordedData.url) {
-      activeObjectUrlsRef.current.push(recordedData.url)
-    }
-    setAudioData(recordedData)
   }
 
-  const handleAudioDiscard = () => {
-    if (audioData?.url) {
-      try {
-        URL.revokeObjectURL(audioData.url)
-      } catch {
-        // Ignore revocation error
-      }
+  const handleDeleteRecording = (recordingId) => {
+    if (isHistorySession && activeMeeting) {
+      setMeetings((prev) =>
+        prev.map((m) =>
+          m.id === activeMeeting.id
+            ? {
+                ...m,
+                recordings: (m.recordings || []).filter(
+                  (r) => r.id !== recordingId
+                ),
+              }
+            : m
+        )
+      )
+    } else {
+      setDraftSession((prev) => ({
+        ...prev,
+        recordings: prev.recordings.filter((r) => r.id !== recordingId),
+      }))
     }
-    setAudioData(null)
+  }
+
+  const handleTranscriptChange = (newText) => {
+    if (isHistorySession && activeMeeting) {
+      setMeetings((prev) =>
+        prev.map((m) =>
+          m.id === activeMeeting.id ? { ...m, transcript: newText } : m
+        )
+      )
+    } else {
+      setDraftSession((prev) => ({
+        ...prev,
+        transcript: newText,
+      }))
+    }
+  }
+
+  const handleDeleteNote = (noteId) => {
+    if (isHistorySession && activeMeeting) {
+      setMeetings((prev) =>
+        prev.map((m) =>
+          m.id === activeMeeting.id
+            ? {
+                ...m,
+                notes: (m.notes || []).filter((n) => n.id !== noteId),
+              }
+            : m
+        )
+      )
+    } else {
+      setDraftSession((prev) => ({
+        ...prev,
+        notes: prev.notes.filter((n) => n.id !== noteId),
+      }))
+    }
   }
 
   // -------------------------------------------------------------
-  // Processing Simulation
+  // Generate Notes Action
   // -------------------------------------------------------------
+  const canGenerate =
+    currentTranscript.trim().length > 0 || currentRecordings.length > 0
 
   const handleGenerateNotes = () => {
-    setIsProcessing(true)
-    // Simulate short network & packaging delay (1.4s)
+    if (!canGenerate || isGenerating) return
+
+    setIsGenerating(true)
+    setDemoNotice(false)
+
+    // Simulate short frontend processing state
     setTimeout(() => {
-      setIsProcessing(false)
-      setHasProcessedDemo(true)
-    }, 1400)
-  }
+      setIsGenerating(false)
+      setDemoNotice(true)
 
-  const handleResetWorkspace = () => {
-    handleAudioDiscard()
-    setTranscript('')
-    setIsProcessing(false)
-    setHasProcessedDemo(false)
-  }
+      // Add a clean demo note to the session so the notes card updates
+      const timestampStr = new Date().toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      }) + ' • Today'
 
-  // Convenience action: allows saving current test capture to mock list
-  const handleSaveToMockHistory = () => {
-    const newId = `meeting-${Date.now()}`
-    const today = new Date().toISOString().split('T')[0]
-    const title = transcript.trim()
-      ? transcript.trim().split('\n')[0].slice(0, 40) + '...'
-      : 'Recorded Audio Meeting'
+      const generatedNote = {
+        id: `note-${Date.now()}`,
+        title: `Meeting Notes — ${new Date().toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+        })}`,
+        preview: currentTranscript.trim()
+          ? `Notes captured from transcript (${currentTranscript.trim().split(/\s+/).length} words)...`
+          : `Notes captured from ${currentRecordings.length} audio recording(s)...`,
+        timestamp: timestampStr,
+        content: `### Meeting Notes (Frontend Demo)
+This note illustrates the frontend layout for generated meeting documentation. In a complete production deployment, this content is returned by the AI processing service using Whisper speech transcription and LLM summarization.
 
-    const newMeeting = {
-      id: newId,
-      title: title || 'Custom Meeting',
-      date: today,
-      audioDuration: audioData?.duration || null,
-      audioUrl: audioData?.url || null,
-      transcript: transcript || 'Audio recorded during this session.',
-      summary: `### Summary\nNotes captured from client session.\n\n### Key Highlights\n- Processed input in client session.\n\n### Action Items\n- [ ] Review captured transcript.`,
-    }
+### Session Inputs Processed
+- Transcript: ${
+          currentTranscript.trim()
+            ? `${currentTranscript.length} characters`
+            : 'None provided'
+        }
+- Audio recordings: ${currentRecordings.length} recording(s)
 
-    setMeetings((prev) => [newMeeting, ...prev])
-    setExpandedFolderIds((prev) => new Set([...prev, newId]))
-    setActiveSelection({ meetingId: newId, childType: 'overview' })
-    handleResetWorkspace()
+### Action Items
+- [ ] Connect backend transcription pipeline.
+- [ ] Connect LLM summarization service.`,
+      }
+
+      if (isHistorySession && activeMeeting) {
+        setMeetings((prev) =>
+          prev.map((m) =>
+            m.id === activeMeeting.id
+              ? {
+                  ...m,
+                  notes: [generatedNote, ...(m.notes || [])],
+                }
+              : m
+          )
+        )
+      } else {
+        setDraftSession((prev) => ({
+          ...prev,
+          notes: [generatedNote, ...prev.notes],
+        }))
+      }
+    }, 1200)
   }
 
   // -------------------------------------------------------------
-  // Rename & Delete Actions
+  // Rename & Delete Meeting Dialogs
   // -------------------------------------------------------------
-
   const handleOpenRename = (meeting) => {
     setRenameModalState({
       isOpen: true,
@@ -187,7 +310,9 @@ export default function App() {
     if (!meeting || !newTitle.trim()) return
 
     setMeetings((prev) =>
-      prev.map((m) => (m.id === meeting.id ? { ...m, title: newTitle.trim() } : m))
+      prev.map((m) =>
+        m.id === meeting.id ? { ...m, title: newTitle.trim() } : m
+      )
     )
     setRenameModalState({ isOpen: false, meeting: null, newTitle: '' })
   }
@@ -205,7 +330,6 @@ export default function App() {
 
     setMeetings((prev) => prev.filter((m) => m.id !== meeting.id))
 
-    // If currently active meeting was deleted, switch back to New Meeting
     if (activeSelection?.meetingId === meeting.id) {
       setActiveSelection(null)
     }
@@ -214,34 +338,27 @@ export default function App() {
   }
 
   // -------------------------------------------------------------
-  // Determine View State
+  // Header Title & Status
   // -------------------------------------------------------------
-
-  const isHistoryView = activeSelection !== null
-  const currentMeeting = isHistoryView
-    ? meetings.find((m) => m.id === activeSelection.meetingId)
-    : null
-
-  // Resolve Header Title & Subtitle
   let headerTitle = 'New Meeting'
   let headerSubTitle = null
   let headerStatus = 'ready'
 
   if (isRecordingAudio) {
     headerStatus = 'recording'
-  } else if (isProcessing) {
+  } else if (isGenerating) {
     headerStatus = 'processing'
-  } else if (isHistoryView && currentMeeting) {
-    headerTitle = currentMeeting.title
+  } else if (isHistorySession && activeMeeting) {
+    headerTitle = activeMeeting.title
     headerStatus = 'archived'
     if (activeSelection.childType === 'audio') headerSubTitle = 'Audio'
     if (activeSelection.childType === 'transcript') headerSubTitle = 'Transcript'
-    if (activeSelection.childType === 'summary') headerSubTitle = 'Summary'
+    if (activeSelection.childType === 'summary') headerSubTitle = 'Notes'
   }
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-white text-gray-900 font-sans antialiased">
-      {/* Sidebar Navigation */}
+      {/* Left Sidebar */}
       <Sidebar
         meetings={meetings}
         isSidebarCollapsed={isSidebarCollapsed}
@@ -269,43 +386,50 @@ export default function App() {
           onToggleSidebarCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
           onOpenMobileDrawer={() => setIsMobileDrawerOpen(true)}
           onNewMeeting={handleNewMeeting}
-          isHistoryView={isHistoryView}
+          isHistoryView={isHistorySession}
         />
 
-        {/* Workspace Body Area */}
+        {/* Workspace Body: Centered Container with max-w-[900px] */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden">
-          {isHistoryView && currentMeeting ? (
-            /* Selected History Item View */
-            <HistoryViewer
-              meeting={currentMeeting}
-              selectedTab={activeSelection.childType}
-              onTabChange={(tab) =>
-                setActiveSelection((prev) => ({ ...prev, childType: tab }))
-              }
-              onNewMeeting={handleNewMeeting}
-            />
-          ) : isProcessing || hasProcessedDemo ? (
-            /* Processing State / Honest Demo Placeholder */
-            <ProcessingState
-              isProcessing={isProcessing}
-              transcript={transcript}
-              audioData={audioData}
-              onResetWorkspace={handleResetWorkspace}
-              onSaveToMockHistory={handleSaveToMockHistory}
-            />
-          ) : (
-            /* New Meeting Capture Workspace */
-            <MeetingInput
-              transcript={transcript}
-              onTranscriptChange={setTranscript}
-              audioData={audioData}
-              onAudioRecorded={handleAudioRecorded}
-              onAudioDiscard={handleAudioDiscard}
-              onGenerateNotes={handleGenerateNotes}
-              isRecordingAudio={isRecordingAudio}
-              setIsRecordingAudio={setIsRecordingAudio}
-            />
-          )}
+          <div className="w-full max-w-[900px] mx-auto px-4 sm:px-6 py-6 md:py-8 space-y-5">
+            {/* 1. Audio Recording Card */}
+            <div id="section-audio">
+              <MeetingAudioCard
+                recordings={currentRecordings}
+                onSaveRecording={handleSaveRecording}
+                onDeleteRecording={handleDeleteRecording}
+                isRecording={isRecordingAudio}
+                setIsRecording={setIsRecordingAudio}
+              />
+            </div>
+
+            {/* 2. Transcript Text Input */}
+            <div id="section-transcript">
+              <MeetingTranscriptInput
+                transcript={currentTranscript}
+                onChange={handleTranscriptChange}
+              />
+            </div>
+
+            {/* 3. Generate Notes Action */}
+            <div id="section-generate">
+              <GenerateNotesAction
+                canGenerate={canGenerate}
+                isGenerating={isGenerating}
+                onGenerateNotes={handleGenerateNotes}
+                demoNotice={demoNotice}
+                onDismissNotice={() => setDemoNotice(false)}
+              />
+            </div>
+
+            {/* 4. Meeting Notes Card */}
+            <div id="section-notes">
+              <MeetingNotesCard
+                notes={currentNotes}
+                onDeleteNote={handleDeleteNote}
+              />
+            </div>
+          </div>
         </div>
       </main>
 
