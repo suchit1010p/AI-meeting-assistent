@@ -257,7 +257,7 @@ export default function MeetingAudioCard({
               type="button"
               onClick={startRecording}
               disabled={!!pendingAudio}
-              className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all shadow-2xs ${
+              className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all shadow-2xs cursor-pointer ${
                 pendingAudio
                   ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                   : 'bg-gray-900 text-white hover:bg-black active:bg-gray-800'

@@ -220,7 +220,7 @@ export default function AudioRecorder({ onRecordingComplete, onRecordingStateCha
         <button
           type="button"
           onClick={startRecording}
-          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-medium text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 active:bg-gray-100 transition-all shadow-2xs"
+          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-medium text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 active:bg-gray-100 transition-all shadow-2xs cursor-pointer"
         >
           <Mic className="w-4 h-4 text-gray-700" />
           <span>Record Audio</span>
