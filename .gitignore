@@ -1,7 +1,6 @@
 .venv
-db.sqlite3
 .env
 __pycache__/
 *.py[cod]
 dist/
-node_modules/
+node_modules/
